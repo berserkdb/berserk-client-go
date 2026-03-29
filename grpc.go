@@ -6,7 +6,7 @@ import (
 	"io"
 
 	querypb "github.com/berserkdb/berserk-client-go/proto/querypb"
-	segmentpb "github.com/berserkdb/berserk-client-go/proto/segmentpb"
+	berserkpb "github.com/berserkdb/berserk-client-go/proto/berserkpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -181,11 +181,11 @@ func convertColumnType(ct querypb.ColumnType) ColumnType {
 	switch ct {
 	case querypb.ColumnType_COLUMN_TYPE_BOOL:
 		return ColumnTypeBool
-	case querypb.ColumnType_COLUMN_TYPE_INT32:
+	case querypb.ColumnType_COLUMN_TYPE_INT:
 		return ColumnTypeInt
-	case querypb.ColumnType_COLUMN_TYPE_INT64:
+	case querypb.ColumnType_COLUMN_TYPE_LONG:
 		return ColumnTypeLong
-	case querypb.ColumnType_COLUMN_TYPE_DOUBLE:
+	case querypb.ColumnType_COLUMN_TYPE_REAL:
 		return ColumnTypeReal
 	case querypb.ColumnType_COLUMN_TYPE_STRING:
 		return ColumnTypeString
@@ -200,42 +200,42 @@ func convertColumnType(ct querypb.ColumnType) ColumnType {
 	}
 }
 
-func convertValue(dyn *segmentpb.TTDynamic) Value {
+func convertValue(dyn *berserkpb.BqlValue) Value {
 	if dyn == nil {
 		return nil
 	}
 	switch v := dyn.Value.(type) {
-	case *segmentpb.TTDynamic_TtNull:
+	case *berserkpb.BqlValue_NullValue:
 		return nil
-	case *segmentpb.TTDynamic_TtBool:
-		return v.TtBool
-	case *segmentpb.TTDynamic_TtInt:
-		return int64(v.TtInt)
-	case *segmentpb.TTDynamic_TtLong:
-		return v.TtLong
-	case *segmentpb.TTDynamic_TtDouble:
-		return v.TtDouble
-	case *segmentpb.TTDynamic_TtString:
-		return v.TtString
-	case *segmentpb.TTDynamic_TtTimestamp:
-		return int64(v.TtTimestamp)
-	case *segmentpb.TTDynamic_TtTimespan:
-		return int64(v.TtTimespan)
-	case *segmentpb.TTDynamic_TtArray:
-		if v.TtArray == nil {
+	case *berserkpb.BqlValue_BoolValue:
+		return v.BoolValue
+	case *berserkpb.BqlValue_IntValue:
+		return int64(v.IntValue)
+	case *berserkpb.BqlValue_LongValue:
+		return v.LongValue
+	case *berserkpb.BqlValue_RealValue:
+		return v.RealValue
+	case *berserkpb.BqlValue_StringValue:
+		return v.StringValue
+	case *berserkpb.BqlValue_DatetimeValue:
+		return int64(v.DatetimeValue)
+	case *berserkpb.BqlValue_TimespanValue:
+		return int64(v.TimespanValue)
+	case *berserkpb.BqlValue_ArrayValue:
+		if v.ArrayValue == nil {
 			return []Value{}
 		}
-		result := make([]Value, len(v.TtArray.Values))
-		for i, elem := range v.TtArray.Values {
+		result := make([]Value, len(v.ArrayValue.Values))
+		for i, elem := range v.ArrayValue.Values {
 			result[i] = convertValue(elem)
 		}
 		return result
-	case *segmentpb.TTDynamic_TtPropertybag:
-		if v.TtPropertybag == nil {
+	case *berserkpb.BqlValue_BagValue:
+		if v.BagValue == nil {
 			return map[string]Value{}
 		}
-		result := make(map[string]Value, len(v.TtPropertybag.Properties))
-		for k, val := range v.TtPropertybag.Properties {
+		result := make(map[string]Value, len(v.BagValue.Properties))
+		for k, val := range v.BagValue.Properties {
 			result[k] = convertValue(val)
 		}
 		return result
