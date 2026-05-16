@@ -7,7 +7,7 @@
 package querypb
 
 import (
-	segmentpb "github.com/berserkdb/berserk-client-go/proto/segmentpb"
+	berserkpb "github.com/berserkdb/berserk-client-go/proto/berserkpb"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -22,14 +22,15 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// BQL data types for column definitions.
 type ColumnType int32
 
 const (
 	ColumnType_COLUMN_TYPE_UNSPECIFIED ColumnType = 0
 	ColumnType_COLUMN_TYPE_BOOL        ColumnType = 1
-	ColumnType_COLUMN_TYPE_INT32       ColumnType = 2
-	ColumnType_COLUMN_TYPE_INT64       ColumnType = 3
-	ColumnType_COLUMN_TYPE_DOUBLE      ColumnType = 4
+	ColumnType_COLUMN_TYPE_INT         ColumnType = 2
+	ColumnType_COLUMN_TYPE_LONG        ColumnType = 3
+	ColumnType_COLUMN_TYPE_REAL        ColumnType = 4
 	ColumnType_COLUMN_TYPE_STRING      ColumnType = 5
 	ColumnType_COLUMN_TYPE_DATETIME    ColumnType = 6
 	ColumnType_COLUMN_TYPE_TIMESPAN    ColumnType = 7
@@ -42,9 +43,9 @@ var (
 	ColumnType_name = map[int32]string{
 		0: "COLUMN_TYPE_UNSPECIFIED",
 		1: "COLUMN_TYPE_BOOL",
-		2: "COLUMN_TYPE_INT32",
-		3: "COLUMN_TYPE_INT64",
-		4: "COLUMN_TYPE_DOUBLE",
+		2: "COLUMN_TYPE_INT",
+		3: "COLUMN_TYPE_LONG",
+		4: "COLUMN_TYPE_REAL",
 		5: "COLUMN_TYPE_STRING",
 		6: "COLUMN_TYPE_DATETIME",
 		7: "COLUMN_TYPE_TIMESPAN",
@@ -54,9 +55,9 @@ var (
 	ColumnType_value = map[string]int32{
 		"COLUMN_TYPE_UNSPECIFIED": 0,
 		"COLUMN_TYPE_BOOL":        1,
-		"COLUMN_TYPE_INT32":       2,
-		"COLUMN_TYPE_INT64":       3,
-		"COLUMN_TYPE_DOUBLE":      4,
+		"COLUMN_TYPE_INT":         2,
+		"COLUMN_TYPE_LONG":        3,
+		"COLUMN_TYPE_REAL":        4,
 		"COLUMN_TYPE_STRING":      5,
 		"COLUMN_TYPE_DATETIME":    6,
 		"COLUMN_TYPE_TIMESPAN":    7,
@@ -92,12 +93,25 @@ func (ColumnType) EnumDescriptor() ([]byte, []int) {
 	return file_query_proto_rawDescGZIP(), []int{0}
 }
 
+// Request to execute a BQL query.
 type ExecuteQueryRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Query         string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
-	Since         string                 `protobuf:"bytes,2,opt,name=since,proto3" json:"since,omitempty"`
-	Until         string                 `protobuf:"bytes,3,opt,name=until,proto3" json:"until,omitempty"`
-	Timezone      string                 `protobuf:"bytes,4,opt,name=timezone,proto3" json:"timezone,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The BQL query string to execute.
+	Query string `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	// Start of the time range (inclusive). Accepts relative expressions like "1h ago"
+	// or absolute timestamps like "2024-01-01T00:00:00Z".
+	Since string `protobuf:"bytes,2,opt,name=since,proto3" json:"since,omitempty"`
+	// End of the time range (exclusive). Same format as `since`. Defaults to now.
+	Until string `protobuf:"bytes,3,opt,name=until,proto3" json:"until,omitempty"`
+	// IANA timezone name for time-based operations (e.g., "America/New_York").
+	// Defaults to UTC if not specified.
+	Timezone string `protobuf:"bytes,4,opt,name=timezone,proto3" json:"timezone,omitempty"`
+	// Database to resolve unqualified table names against. Required.
+	// Callers may send either a UUID (`identifier.id`) or a name
+	// (`identifier.name`); the server resolves names once per request via
+	// the metadata service. Empty / unset oneof rejected with
+	// `InvalidArgument`.
+	Database      *berserkpb.DatabaseRef `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -160,10 +174,20 @@ func (x *ExecuteQueryRequest) GetTimezone() string {
 	return ""
 }
 
-// A single frame in the stream of results for a query.
+func (x *ExecuteQueryRequest) GetDatabase() *berserkpb.DatabaseRef {
+	if x != nil {
+		return x.Database
+	}
+	return nil
+}
+
+// A single frame in the streaming response for a query.
+// Frames arrive in order: Schema frames first, then interleaved RowBatch and Progress frames,
+// and finally a Completion or Error frame.
 type ExecuteQueryResultFrame struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Unique identifier for this request, echoed from the server.
+	RequestId string `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*ExecuteQueryResultFrame_Schema
@@ -280,39 +304,35 @@ type isExecuteQueryResultFrame_Payload interface {
 }
 
 type ExecuteQueryResultFrame_Schema struct {
-	// TableSchema contains the schema of one table in the results and will always be
-	// sent before the associated RowBatches.
+	// Table schema — sent once per table before any RowBatch frames for that table.
 	Schema *TableSchema `protobuf:"bytes,2,opt,name=schema,proto3,oneof"`
 }
 
 type ExecuteQueryResultFrame_Batch struct {
-	// RowBatch contains the rows. Note that each RowBatch belongs to a result iteration
-	// and for every new result iteration, the old set of RowBatches should be discarded.
-	// We need this setup of a result set of multiple rowbatches to avoid hitting the 4MB
-	// limit in gRPC messages.
+	// A batch of result rows. Multiple batches may arrive for the same table and iteration.
+	// When `result_iteration_id` changes, discard all previous rows and start fresh.
 	Batch *RowBatch `protobuf:"bytes,3,opt,name=batch,proto3,oneof"`
 }
 
 type ExecuteQueryResultFrame_Done struct {
-	// If done is sent, then this stream can be closed and no more events will be sent.
-	// TODO: We need to be able to signal that a result iteration is done. We should use completion for that.
+	// Signals that the query has completed and no more frames will be sent.
 	Done *Completion `protobuf:"bytes,5,opt,name=done,proto3,oneof"`
 }
 
 type ExecuteQueryResultFrame_Progress struct {
-	// / Aux events for progress, etc.
-	// progress contains the progress since the last progress was sent.
+	// Cumulative execution statistics. Sent periodically during query execution.
+	// Each Progress frame supersedes the previous one.
 	Progress *Progress `protobuf:"bytes,4,opt,name=progress,proto3,oneof"`
 }
 
 type ExecuteQueryResultFrame_Error struct {
-	// error indicates that some error happened that impacted the result set.
+	// A query execution error. The stream ends after this frame.
 	Error *Error `protobuf:"bytes,6,opt,name=error,proto3,oneof"`
 }
 
 type ExecuteQueryResultFrame_Metadata struct {
-	// metadata carries warnings or partial failures for the current result set.
-	Metadata *ResultMetadata `protobuf:"bytes,7,opt,name=metadata,proto3,oneof"` // TODO: Add healthcheck frame
+	// Warnings, partial failures, and visualization hints for the current result set.
+	Metadata *ResultMetadata `protobuf:"bytes,7,opt,name=metadata,proto3,oneof"`
 }
 
 func (*ExecuteQueryResultFrame_Schema) isExecuteQueryResultFrame_Payload() {}
@@ -327,10 +347,13 @@ func (*ExecuteQueryResultFrame_Error) isExecuteQueryResultFrame_Payload() {}
 
 func (*ExecuteQueryResultFrame_Metadata) isExecuteQueryResultFrame_Payload() {}
 
+// Schema definition for a result table.
 type TableSchema struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Columns       []*Column              `protobuf:"bytes,2,rep,name=columns,proto3" json:"columns,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Table name (e.g., "PrimaryResult", "ExtraTable_0", or a fork branch name).
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Ordered list of columns in this table.
+	Columns       []*Column `protobuf:"bytes,2,rep,name=columns,proto3" json:"columns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -379,13 +402,25 @@ func (x *TableSchema) GetColumns() []*Column {
 	return nil
 }
 
+// A column definition within a table schema.
 type Column struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Type          ColumnType             `protobuf:"varint,2,opt,name=type,proto3,enum=query.ColumnType" json:"type,omitempty"`
-	Nullable      bool                   `protobuf:"varint,3,opt,name=nullable,proto3" json:"nullable,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Column name.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Data type of the column.
+	Type ColumnType `protobuf:"varint,2,opt,name=type,proto3,enum=query.ColumnType" json:"type,omitempty"`
+	// Whether the column may contain null values.
+	Nullable bool `protobuf:"varint,3,opt,name=nullable,proto3" json:"nullable,omitempty"`
+	// Berserk extension. Optional structural type for `dynamic` columns
+	// when the engine knows the inner shape (e.g. an `Array<Real>`
+	// produced by `make-series`, or an `Object{...}` produced by
+	// `bag_pack`). Absent means "opaque dynamic, infer by convention"
+	// — the same shape ADX returns. Clients that don't know this
+	// field ignore it (proto3 unknown-field tolerance) and continue
+	// operating against a plain `dynamic` column type.
+	StructuralType *StructuralType `protobuf:"bytes,4,opt,name=structural_type,json=structuralType,proto3,oneof" json:"structural_type,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Column) Reset() {
@@ -439,19 +474,237 @@ func (x *Column) GetNullable() bool {
 	return false
 }
 
+func (x *Column) GetStructuralType() *StructuralType {
+	if x != nil {
+		return x.StructuralType
+	}
+	return nil
+}
+
+// Structural type information for a `dynamic` column. Recursive
+// because dynamics can be arrays of objects, objects with array
+// fields, etc. Mirrors the engine-internal `AnnotationType` ADT.
+type StructuralType struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*StructuralType_Scalar
+	//	*StructuralType_ArrayElem
+	//	*StructuralType_Object
+	Kind          isStructuralType_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StructuralType) Reset() {
+	*x = StructuralType{}
+	mi := &file_query_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StructuralType) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StructuralType) ProtoMessage() {}
+
+func (x *StructuralType) ProtoReflect() protoreflect.Message {
+	mi := &file_query_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StructuralType.ProtoReflect.Descriptor instead.
+func (*StructuralType) Descriptor() ([]byte, []int) {
+	return file_query_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *StructuralType) GetKind() isStructuralType_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *StructuralType) GetScalar() ColumnType {
+	if x != nil {
+		if x, ok := x.Kind.(*StructuralType_Scalar); ok {
+			return x.Scalar
+		}
+	}
+	return ColumnType_COLUMN_TYPE_UNSPECIFIED
+}
+
+func (x *StructuralType) GetArrayElem() *StructuralType {
+	if x != nil {
+		if x, ok := x.Kind.(*StructuralType_ArrayElem); ok {
+			return x.ArrayElem
+		}
+	}
+	return nil
+}
+
+func (x *StructuralType) GetObject() *ObjectSchema {
+	if x != nil {
+		if x, ok := x.Kind.(*StructuralType_Object); ok {
+			return x.Object
+		}
+	}
+	return nil
+}
+
+type isStructuralType_Kind interface {
+	isStructuralType_Kind()
+}
+
+type StructuralType_Scalar struct {
+	// Element is a scalar of the given type. The outer `Column.type`
+	// is `dynamic`; this `scalar` carries the inner type.
+	Scalar ColumnType `protobuf:"varint,1,opt,name=scalar,proto3,enum=query.ColumnType,oneof"`
+}
+
+type StructuralType_ArrayElem struct {
+	// Element is a homogeneous array of the given inner shape.
+	// E.g. `make-series s = sum(v) on t step 5s` produces:
+	//   - `s`: array_elem = scalar(LONG)   — array of longs
+	//   - `t`: array_elem = scalar(DATETIME) — array of datetimes
+	ArrayElem *StructuralType `protobuf:"bytes,2,opt,name=array_elem,json=arrayElem,proto3,oneof"`
+}
+
+type StructuralType_Object struct {
+	// Element is an object (property bag) with named fields. Each
+	// field carries its own structural type. E.g. `series_decompose`
+	// returns `{baseline, seasonal, trend, residual}` each of which
+	// is an array of reals.
+	Object *ObjectSchema `protobuf:"bytes,3,opt,name=object,proto3,oneof"`
+}
+
+func (*StructuralType_Scalar) isStructuralType_Kind() {}
+
+func (*StructuralType_ArrayElem) isStructuralType_Kind() {}
+
+func (*StructuralType_Object) isStructuralType_Kind() {}
+
+// Object schema for a `dynamic` column whose inner shape is a
+// property bag with known named fields.
+type ObjectSchema struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Fields        []*ObjectField         `protobuf:"bytes,1,rep,name=fields,proto3" json:"fields,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectSchema) Reset() {
+	*x = ObjectSchema{}
+	mi := &file_query_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectSchema) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectSchema) ProtoMessage() {}
+
+func (x *ObjectSchema) ProtoReflect() protoreflect.Message {
+	mi := &file_query_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectSchema.ProtoReflect.Descriptor instead.
+func (*ObjectSchema) Descriptor() ([]byte, []int) {
+	return file_query_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ObjectSchema) GetFields() []*ObjectField {
+	if x != nil {
+		return x.Fields
+	}
+	return nil
+}
+
+// One named field within an `ObjectSchema`.
+type ObjectField struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type          *StructuralType        `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ObjectField) Reset() {
+	*x = ObjectField{}
+	mi := &file_query_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ObjectField) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ObjectField) ProtoMessage() {}
+
+func (x *ObjectField) ProtoReflect() protoreflect.Message {
+	mi := &file_query_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ObjectField.ProtoReflect.Descriptor instead.
+func (*ObjectField) Descriptor() ([]byte, []int) {
+	return file_query_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ObjectField) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ObjectField) GetType() *StructuralType {
+	if x != nil {
+		return x.Type
+	}
+	return nil
+}
+
+// A batch of rows belonging to a single table and result iteration.
 type RowBatch struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// table_name referes to the name of the table as specified in a QueryTableSchema.
+	// Name of the table this batch belongs to (matches a TableSchema.name).
 	TableName string `protobuf:"bytes,1,opt,name=table_name,json=tableName,proto3" json:"table_name,omitempty"`
-	// result_iteration_id is an opaque string that identifies a specific result iteration.
-	// Whenever a new result iteration starts, all previous rows should be discarded. Thus
-	// a result iteration is a complete set of rows for a query.
+	// Opaque identifier for the current result iteration. When this value changes,
+	// all previously received rows for all tables must be discarded — the new iteration
+	// represents a more complete result set that supersedes the previous one.
 	ResultIterationId string `protobuf:"bytes,2,opt,name=result_iteration_id,json=resultIterationId,proto3" json:"result_iteration_id,omitempty"`
-	// ValueRow contains rows in this batch.
+	// Rows in this batch. Column order matches the TableSchema for this table.
 	Rows []*ValueRow `protobuf:"bytes,3,rep,name=rows,proto3" json:"rows,omitempty"`
-	// True when this is the last batch for this result_iteration_id.
-	// UI should only render complete iterations (where is_iteration_complete=true),
-	// except for the first batch which can be shown immediately for fast feedback.
+	// True when this is the last batch for this table in the current iteration.
+	// Clients should show the first batch immediately for fast feedback, then
+	// accumulate subsequent batches until this flag is true.
 	IsIterationComplete bool `protobuf:"varint,4,opt,name=is_iteration_complete,json=isIterationComplete,proto3" json:"is_iteration_complete,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
@@ -459,7 +712,7 @@ type RowBatch struct {
 
 func (x *RowBatch) Reset() {
 	*x = RowBatch{}
-	mi := &file_query_proto_msgTypes[4]
+	mi := &file_query_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -471,7 +724,7 @@ func (x *RowBatch) String() string {
 func (*RowBatch) ProtoMessage() {}
 
 func (x *RowBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[4]
+	mi := &file_query_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -484,7 +737,7 @@ func (x *RowBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RowBatch.ProtoReflect.Descriptor instead.
 func (*RowBatch) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{4}
+	return file_query_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RowBatch) GetTableName() string {
@@ -515,18 +768,19 @@ func (x *RowBatch) GetIsIterationComplete() bool {
 	return false
 }
 
+// A single row of dynamically-typed values.
 type ValueRow struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Values contains the values for this row. The order of values matches the order of columns
-	// in the QueryTableSchema for the table this row belongs to.
-	Values        []*segmentpb.TTDynamic `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	// Cell values in column order. Each value corresponds to the column at the same
+	// index in the TableSchema.
+	Values        []*berserkpb.BqlValue `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ValueRow) Reset() {
 	*x = ValueRow{}
-	mi := &file_query_proto_msgTypes[5]
+	mi := &file_query_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -538,7 +792,7 @@ func (x *ValueRow) String() string {
 func (*ValueRow) ProtoMessage() {}
 
 func (x *ValueRow) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[5]
+	mi := &file_query_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -551,61 +805,127 @@ func (x *ValueRow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValueRow.ProtoReflect.Descriptor instead.
 func (*ValueRow) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{5}
+	return file_query_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *ValueRow) GetValues() []*segmentpb.TTDynamic {
+func (x *ValueRow) GetValues() []*berserkpb.BqlValue {
 	if x != nil {
 		return x.Values
 	}
 	return nil
 }
 
+// Cumulative execution statistics for the running query.
+// Each Progress frame contains the total counts since the query started —
+// always use the latest frame and discard earlier ones.
 type Progress struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Execution statistics
-	RowsProcessed      uint64 `protobuf:"varint,1,opt,name=rows_processed,json=rowsProcessed,proto3" json:"rows_processed,omitempty"`
-	ChunksTotal        uint64 `protobuf:"varint,2,opt,name=chunks_total,json=chunksTotal,proto3" json:"chunks_total,omitempty"`
-	ChunksScanned      uint64 `protobuf:"varint,3,opt,name=chunks_scanned,json=chunksScanned,proto3" json:"chunks_scanned,omitempty"`
+	// Total rows processed across all chunks.
+	RowsProcessed uint64 `protobuf:"varint,1,opt,name=rows_processed,json=rowsProcessed,proto3" json:"rows_processed,omitempty"`
+	// Total number of chunks in the query's time range.
+	ChunksTotal uint64 `protobuf:"varint,2,opt,name=chunks_total,json=chunksTotal,proto3" json:"chunks_total,omitempty"`
+	// Chunks that were scanned (read and evaluated).
+	ChunksScanned uint64 `protobuf:"varint,3,opt,name=chunks_scanned,json=chunksScanned,proto3" json:"chunks_scanned,omitempty"`
+	// Chunks skipped because their time range didn't overlap the query range.
 	ChunksSkippedRange uint64 `protobuf:"varint,4,opt,name=chunks_skipped_range,json=chunksSkippedRange,proto3" json:"chunks_skipped_range,omitempty"`
+	// Chunks skipped by bloom filter (no matching values).
 	ChunksSkippedBloom uint64 `protobuf:"varint,5,opt,name=chunks_skipped_bloom,json=chunksSkippedBloom,proto3" json:"chunks_skipped_bloom,omitempty"`
-	ChunksSkippedShar  uint64 `protobuf:"varint,6,opt,name=chunks_skipped_shar,json=chunksSkippedShar,proto3" json:"chunks_skipped_shar,omitempty"`
-	PredicateChecks    uint64 `protobuf:"varint,7,opt,name=predicate_checks,json=predicateChecks,proto3" json:"predicate_checks,omitempty"`
-	// Field 8 removed (was bloom_checks - dead code)
-	ShortCircuitCompletion     bool   `protobuf:"varint,9,opt,name=short_circuit_completion,json=shortCircuitCompletion,proto3" json:"short_circuit_completion,omitempty"`
-	ChunkScannedRawBodySize    uint64 `protobuf:"varint,10,opt,name=chunk_scanned_raw_body_size,json=chunkScannedRawBodySize,proto3" json:"chunk_scanned_raw_body_size,omitempty"`
-	ChunkSkippedRawBodySize    uint64 `protobuf:"varint,11,opt,name=chunk_skipped_raw_body_size,json=chunkSkippedRawBodySize,proto3" json:"chunk_skipped_raw_body_size,omitempty"`
+	// Chunks skipped by shard hash (not matching the target shard).
+	ChunksSkippedShard uint64 `protobuf:"varint,6,opt,name=chunks_skipped_shard,json=chunksSkippedShard,proto3" json:"chunks_skipped_shard,omitempty"`
+	// Total predicate evaluations performed during scanning.
+	PredicateChecks uint64 `protobuf:"varint,7,opt,name=predicate_checks,json=predicateChecks,proto3" json:"predicate_checks,omitempty"`
+	// True when the query completed early via short-circuit optimization.
+	ShortCircuitCompletion bool `protobuf:"varint,9,opt,name=short_circuit_completion,json=shortCircuitCompletion,proto3" json:"short_circuit_completion,omitempty"`
+	// Total uncompressed bytes of scanned chunk bodies.
+	ChunkScannedRawBodySize uint64 `protobuf:"varint,10,opt,name=chunk_scanned_raw_body_size,json=chunkScannedRawBodySize,proto3" json:"chunk_scanned_raw_body_size,omitempty"`
+	// Total uncompressed bytes of skipped chunk bodies.
+	ChunkSkippedRawBodySize uint64 `protobuf:"varint,11,opt,name=chunk_skipped_raw_body_size,json=chunkSkippedRawBodySize,proto3" json:"chunk_skipped_raw_body_size,omitempty"`
+	// Total compressed bytes of skipped chunks.
 	ChunkSkippedCompressedSize uint64 `protobuf:"varint,12,opt,name=chunk_skipped_compressed_size,json=chunkSkippedCompressedSize,proto3" json:"chunk_skipped_compressed_size,omitempty"`
-	ChunkScanTimeNanos         uint64 `protobuf:"varint,13,opt,name=chunk_scan_time_nanos,json=chunkScanTimeNanos,proto3" json:"chunk_scan_time_nanos,omitempty"`
-	QueryTimeNanos             uint64 `protobuf:"varint,14,opt,name=query_time_nanos,json=queryTimeNanos,proto3" json:"query_time_nanos,omitempty"`
+	// Wall-clock time spent scanning chunks (nanoseconds).
+	ChunkScanTimeNanos uint64 `protobuf:"varint,13,opt,name=chunk_scan_time_nanos,json=chunkScanTimeNanos,proto3" json:"chunk_scan_time_nanos,omitempty"`
+	// Total query execution time (nanoseconds).
+	QueryTimeNanos uint64 `protobuf:"varint,14,opt,name=query_time_nanos,json=queryTimeNanos,proto3" json:"query_time_nanos,omitempty"`
+	// Total compressed bytes of scanned chunks.
 	ChunkScannedCompressedSize uint64 `protobuf:"varint,15,opt,name=chunk_scanned_compressed_size,json=chunkScannedCompressedSize,proto3" json:"chunk_scanned_compressed_size,omitempty"`
-	// Bin progress for queries using bin() on numeric or time fields
+	// Per-bin completion progress for `summarize ... by bin()` queries.
 	BinProgress *BinProgress `protobuf:"bytes,16,opt,name=bin_progress,json=binProgress,proto3,oneof" json:"bin_progress,omitempty"`
-	// Time spent waiting in queue before execution started (nanoseconds).
+	// Time spent waiting in the query queue before execution started (nanoseconds).
 	// Present when the query was queued due to concurrent query limits.
 	QueueWaitNanos *uint64 `protobuf:"varint,17,opt,name=queue_wait_nanos,json=queueWaitNanos,proto3,oneof" json:"queue_wait_nanos,omitempty"`
-	// Planning progress during segment processing phase.
-	// Present during planning, None after planning completes.
+	// Segment planning progress. Present during planning, absent after planning completes.
 	PlanningProgress *PlanningProgress `protobuf:"bytes,18,opt,name=planning_progress,json=planningProgress,proto3,oneof" json:"planning_progress,omitempty"`
-	// Total bytes of BLOM chunks evaluated during bloom filtering.
+	// Total bytes of bloom filter data evaluated during bloom filtering.
 	BloomFilterBytes uint64 `protobuf:"varint,19,opt,name=bloom_filter_bytes,json=bloomFilterBytes,proto3" json:"bloom_filter_bytes,omitempty"`
-	// Wall-clock time spent in merge+delivery across all query threads (nanoseconds).
+	// Wall-clock time spent in merge and delivery across all query threads (nanoseconds).
 	MergeTimeNanos uint64 `protobuf:"varint,20,opt,name=merge_time_nanos,json=mergeTimeNanos,proto3" json:"merge_time_nanos,omitempty"`
-	// Chunks scanned that yielded zero rows passing filters (false positives from pre-filtering).
+	// Chunks that were scanned but yielded zero matching rows (false positives from pre-filtering).
 	ChunksEmptyScan uint64 `protobuf:"varint,21,opt,name=chunks_empty_scan,json=chunksEmptyScan,proto3" json:"chunks_empty_scan,omitempty"`
-	// Chunks that passed pre-filters but failed during row processing (e.g. type conversion error).
+	// Chunks that encountered errors during row processing (e.g., type conversion failure).
 	ChunksErrored uint64 `protobuf:"varint,22,opt,name=chunks_errored,json=chunksErrored,proto3" json:"chunks_errored,omitempty"`
-	// Chunks skipped because required input fields were absent from the chunk.
+	// Chunks skipped because required input fields were absent from the chunk schema.
 	ChunksSkippedRequiredFields uint64 `protobuf:"varint,23,opt,name=chunks_skipped_required_fields,json=chunksSkippedRequiredFields,proto3" json:"chunks_skipped_required_fields,omitempty"`
-	// Extended per-operator diagnostics in a stable key/value envelope.
+	// Per-operator diagnostic telemetry in a stable key-value envelope.
 	OperatorDiagnostics []*OperatorDiagnostics `protobuf:"bytes,24,rep,name=operator_diagnostics,json=operatorDiagnostics,proto3" json:"operator_diagnostics,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Chunks scanned where the range predicate could not be resolved at chunk level and
+	// required per-row evaluation (i.e., the hoisted range did not fully cover the chunk).
+	ChunksRangePerRow uint64 `protobuf:"varint,25,opt,name=chunks_range_per_row,json=chunksRangePerRow,proto3" json:"chunks_range_per_row,omitempty"`
+	// Number of merge+delivery invocations summed across all query threads.
+	// Pair counter for `merge_time_nanos`.
+	MergeCount uint64 `protobuf:"varint,26,opt,name=merge_count,json=mergeCount,proto3" json:"merge_count,omitempty"`
+	// Wall-clock time spent cloning reducer state during merge invocations
+	// (nanoseconds, summed across all threads).
+	ReducerCloneTimeNanos uint64 `protobuf:"varint,27,opt,name=reducer_clone_time_nanos,json=reducerCloneTimeNanos,proto3" json:"reducer_clone_time_nanos,omitempty"`
+	// Number of reducer-state clones recorded into `reducer_clone_time_nanos`.
+	ReducerCloneCount uint64 `protobuf:"varint,28,opt,name=reducer_clone_count,json=reducerCloneCount,proto3" json:"reducer_clone_count,omitempty"`
+	// Cumulative wall-clock time the coordinator spent building intermediate
+	// streaming snapshots (excludes the final result build). Nanoseconds.
+	SnapshotBuildTimeNanos uint64 `protobuf:"varint,29,opt,name=snapshot_build_time_nanos,json=snapshotBuildTimeNanos,proto3" json:"snapshot_build_time_nanos,omitempty"`
+	// Number of intermediate snapshot builds counted into
+	// `snapshot_build_time_nanos`. Pair counter; consumers can compute the
+	// average build duration that drives adaptive snapshot pacing.
+	SnapshotBuildCount uint64 `protobuf:"varint,30,opt,name=snapshot_build_count,json=snapshotBuildCount,proto3" json:"snapshot_build_count,omitempty"`
+	// Sum of thread CPU time spent inside the chunks arm of
+	// `query_thread_loop` (nanoseconds, across all worker threads). Pair
+	// with the chunks-arm wall (`worker_processing_time_nanos` engine-side):
+	// wall ≫ CPU implies threads are parked on I/O / mutexes /
+	// oversubscription; wall ≈ CPU implies CPU is the bottleneck.
+	WorkerChunksArmCpuNanos uint64 `protobuf:"varint,31,opt,name=worker_chunks_arm_cpu_nanos,json=workerChunksArmCpuNanos,proto3" json:"worker_chunks_arm_cpu_nanos,omitempty"`
+	// Sum of wall-clock time worker threads spent inside
+	// `reader.fetch_chunk_data().await` — i.e. the cache_server fetch path
+	// for chunk bytes. Nanoseconds, across all worker threads.
+	WorkerFetchingChunkNanos uint64 `protobuf:"varint,32,opt,name=worker_fetching_chunk_nanos,json=workerFetchingChunkNanos,proto3" json:"worker_fetching_chunk_nanos,omitempty"`
+	// Sum of wall-clock time inside the synchronous chunk-body closure
+	// (decompression + per-row scan + branch accounting). Nanoseconds,
+	// across all worker threads. Pair with `worker_fetching_chunk_nanos`
+	// to split chunk-arm wall into I/O wait vs scan body.
+	WorkerChunkBodyNanos uint64 `protobuf:"varint,33,opt,name=worker_chunk_body_nanos,json=workerChunkBodyNanos,proto3" json:"worker_chunk_body_nanos,omitempty"`
+	// Generic counter bag (`CustomStats` from #2830). Lets engine emit
+	// new measurements without a proto schema change for each one.
+	// Keys are dotted lowercase namespaces — `bloom.short_circuit_chunks`,
+	// `storage.bytes_fetched_cold`, `predicate.<i>.rows_kept`. Values are
+	// sums across all worker threads; the coordinator merges per-key
+	// before serializing.
+	CustomStats map[string]uint64 `protobuf:"bytes,34,rep,name=custom_stats,json=customStats,proto3" json:"custom_stats,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// Cumulative cache-layer S3 retries observed answering this query.
+	// Surfaced by `SegmentCacheTrait::fetch_stats_snapshot`; the
+	// cache_server reports per-`OpenedItem` retries from its bounded
+	// `get_cache_handle_inner` loop and the client tallies them on the
+	// session. Non-zero is normal under flaky-backend conditions; a
+	// sustained delta says the backend is the bottleneck.
+	S3RetriesTotal uint64 `protobuf:"varint,35,opt,name=s3_retries_total,json=s3RetriesTotal,proto3" json:"s3_retries_total,omitempty"`
+	// Cumulative cache-layer S3 give-ups for this query — one per cache
+	// open that hit the bounded retry deadline or returned a
+	// non-retriable error. Each give-up typically corresponds to a
+	// PartialFailure for the segment it was trying to open.
+	S3GiveupsTotal uint64 `protobuf:"varint,36,opt,name=s3_giveups_total,json=s3GiveupsTotal,proto3" json:"s3_giveups_total,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Progress) Reset() {
 	*x = Progress{}
-	mi := &file_query_proto_msgTypes[6]
+	mi := &file_query_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -617,7 +937,7 @@ func (x *Progress) String() string {
 func (*Progress) ProtoMessage() {}
 
 func (x *Progress) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[6]
+	mi := &file_query_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -630,7 +950,7 @@ func (x *Progress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Progress.ProtoReflect.Descriptor instead.
 func (*Progress) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{6}
+	return file_query_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Progress) GetRowsProcessed() uint64 {
@@ -668,9 +988,9 @@ func (x *Progress) GetChunksSkippedBloom() uint64 {
 	return 0
 }
 
-func (x *Progress) GetChunksSkippedShar() uint64 {
+func (x *Progress) GetChunksSkippedShard() uint64 {
 	if x != nil {
-		return x.ChunksSkippedShar
+		return x.ChunksSkippedShard
 	}
 	return 0
 }
@@ -794,18 +1114,106 @@ func (x *Progress) GetOperatorDiagnostics() []*OperatorDiagnostics {
 	return nil
 }
 
+func (x *Progress) GetChunksRangePerRow() uint64 {
+	if x != nil {
+		return x.ChunksRangePerRow
+	}
+	return 0
+}
+
+func (x *Progress) GetMergeCount() uint64 {
+	if x != nil {
+		return x.MergeCount
+	}
+	return 0
+}
+
+func (x *Progress) GetReducerCloneTimeNanos() uint64 {
+	if x != nil {
+		return x.ReducerCloneTimeNanos
+	}
+	return 0
+}
+
+func (x *Progress) GetReducerCloneCount() uint64 {
+	if x != nil {
+		return x.ReducerCloneCount
+	}
+	return 0
+}
+
+func (x *Progress) GetSnapshotBuildTimeNanos() uint64 {
+	if x != nil {
+		return x.SnapshotBuildTimeNanos
+	}
+	return 0
+}
+
+func (x *Progress) GetSnapshotBuildCount() uint64 {
+	if x != nil {
+		return x.SnapshotBuildCount
+	}
+	return 0
+}
+
+func (x *Progress) GetWorkerChunksArmCpuNanos() uint64 {
+	if x != nil {
+		return x.WorkerChunksArmCpuNanos
+	}
+	return 0
+}
+
+func (x *Progress) GetWorkerFetchingChunkNanos() uint64 {
+	if x != nil {
+		return x.WorkerFetchingChunkNanos
+	}
+	return 0
+}
+
+func (x *Progress) GetWorkerChunkBodyNanos() uint64 {
+	if x != nil {
+		return x.WorkerChunkBodyNanos
+	}
+	return 0
+}
+
+func (x *Progress) GetCustomStats() map[string]uint64 {
+	if x != nil {
+		return x.CustomStats
+	}
+	return nil
+}
+
+func (x *Progress) GetS3RetriesTotal() uint64 {
+	if x != nil {
+		return x.S3RetriesTotal
+	}
+	return 0
+}
+
+func (x *Progress) GetS3GiveupsTotal() uint64 {
+	if x != nil {
+		return x.S3GiveupsTotal
+	}
+	return 0
+}
+
+// Diagnostic telemetry for a specific query operator.
 type OperatorDiagnostics struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	OperatorId    uint32                 `protobuf:"varint,2,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
-	Values        []*KeyValue            `protobuf:"bytes,3,rep,name=values,proto3" json:"values,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Operator kind (e.g., "summarize", "join").
+	Kind string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	// Operator ID within the query plan.
+	OperatorId uint32 `protobuf:"varint,2,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
+	// Key-value diagnostic entries.
+	Values        []*KeyValue `protobuf:"bytes,3,rep,name=values,proto3" json:"values,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *OperatorDiagnostics) Reset() {
 	*x = OperatorDiagnostics{}
-	mi := &file_query_proto_msgTypes[7]
+	mi := &file_query_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -817,7 +1225,7 @@ func (x *OperatorDiagnostics) String() string {
 func (*OperatorDiagnostics) ProtoMessage() {}
 
 func (x *OperatorDiagnostics) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[7]
+	mi := &file_query_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -830,7 +1238,7 @@ func (x *OperatorDiagnostics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperatorDiagnostics.ProtoReflect.Descriptor instead.
 func (*OperatorDiagnostics) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{7}
+	return file_query_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *OperatorDiagnostics) GetKind() string {
@@ -854,6 +1262,7 @@ func (x *OperatorDiagnostics) GetValues() []*KeyValue {
 	return nil
 }
 
+// A string key-value pair.
 type KeyValue struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -864,7 +1273,7 @@ type KeyValue struct {
 
 func (x *KeyValue) Reset() {
 	*x = KeyValue{}
-	mi := &file_query_proto_msgTypes[8]
+	mi := &file_query_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +1285,7 @@ func (x *KeyValue) String() string {
 func (*KeyValue) ProtoMessage() {}
 
 func (x *KeyValue) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[8]
+	mi := &file_query_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +1298,7 @@ func (x *KeyValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyValue.ProtoReflect.Descriptor instead.
 func (*KeyValue) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{8}
+	return file_query_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *KeyValue) GetKey() string {
@@ -906,14 +1315,12 @@ func (x *KeyValue) GetValue() string {
 	return ""
 }
 
-// Progress information for the planning phase.
-// During planning, workers process segments (loading MIMX, applying filters,
-// computing chunk/slice overlaps). This tracks that progress.
+// Segment planning progress.
 type PlanningProgress struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Number of segments that have completed planning across all workers.
+	// Number of segments that have completed planning.
 	SegmentsDone uint64 `protobuf:"varint,1,opt,name=segments_done,json=segmentsDone,proto3" json:"segments_done,omitempty"`
-	// Total number of segments to process across all workers.
+	// Total number of segments to plan.
 	SegmentsTotal uint64 `protobuf:"varint,2,opt,name=segments_total,json=segmentsTotal,proto3" json:"segments_total,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -921,7 +1328,7 @@ type PlanningProgress struct {
 
 func (x *PlanningProgress) Reset() {
 	*x = PlanningProgress{}
-	mi := &file_query_proto_msgTypes[9]
+	mi := &file_query_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -933,7 +1340,7 @@ func (x *PlanningProgress) String() string {
 func (*PlanningProgress) ProtoMessage() {}
 
 func (x *PlanningProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[9]
+	mi := &file_query_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -946,7 +1353,7 @@ func (x *PlanningProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanningProgress.ProtoReflect.Descriptor instead.
 func (*PlanningProgress) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{9}
+	return file_query_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PlanningProgress) GetSegmentsDone() uint64 {
@@ -963,17 +1370,16 @@ func (x *PlanningProgress) GetSegmentsTotal() uint64 {
 	return 0
 }
 
-// Progress information for bin() aggregations.
-// Reports completion progress per bin for queries using `summarize ... by bin(field, span)`.
+// Per-bin completion progress for `summarize ... by bin()` queries.
 type BinProgress struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Start value of the first bin (the bin boundary).
-	// Bin N covers range [first_bin_start + N * bin_span, first_bin_start + (N+1) * bin_span)
+	// Start value of the first bin boundary.
+	// Bin N covers [first_bin_start + N * bin_span, first_bin_start + (N+1) * bin_span).
 	FirstBinStart int64 `protobuf:"zigzag64,1,opt,name=first_bin_start,json=firstBinStart,proto3" json:"first_bin_start,omitempty"`
-	// Span (width) of each bin.
+	// Width of each bin.
 	BinSpan uint64 `protobuf:"varint,2,opt,name=bin_span,json=binSpan,proto3" json:"bin_span,omitempty"`
-	// Completion percentage (0-100) for each bin.
-	// Index i corresponds to bin i. Value 100 means all workers have reported.
+	// Completion percentage (0-100) for each bin, one byte per bin.
+	// Index i corresponds to bin i. Value 100 means fully scanned.
 	CompletionPercentages []byte `protobuf:"bytes,3,opt,name=completion_percentages,json=completionPercentages,proto3" json:"completion_percentages,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
@@ -981,7 +1387,7 @@ type BinProgress struct {
 
 func (x *BinProgress) Reset() {
 	*x = BinProgress{}
-	mi := &file_query_proto_msgTypes[10]
+	mi := &file_query_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -993,7 +1399,7 @@ func (x *BinProgress) String() string {
 func (*BinProgress) ProtoMessage() {}
 
 func (x *BinProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[10]
+	mi := &file_query_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1006,7 +1412,7 @@ func (x *BinProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BinProgress.ProtoReflect.Descriptor instead.
 func (*BinProgress) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{10}
+	return file_query_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *BinProgress) GetFirstBinStart() int64 {
@@ -1030,6 +1436,7 @@ func (x *BinProgress) GetCompletionPercentages() []byte {
 	return nil
 }
 
+// Signals that the query has completed successfully.
 type Completion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1038,7 +1445,7 @@ type Completion struct {
 
 func (x *Completion) Reset() {
 	*x = Completion{}
-	mi := &file_query_proto_msgTypes[11]
+	mi := &file_query_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1050,7 +1457,7 @@ func (x *Completion) String() string {
 func (*Completion) ProtoMessage() {}
 
 func (x *Completion) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[11]
+	mi := &file_query_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1063,22 +1470,23 @@ func (x *Completion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Completion.ProtoReflect.Descriptor instead.
 func (*Completion) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{11}
+	return file_query_proto_rawDescGZIP(), []int{14}
 }
 
+// A query execution error.
 type Error struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Error code - discriminator for error_details (e.g., "UnknownFunction", "TypeMismatch")
+	// Error code discriminator (e.g., "UnknownFunction", "TypeMismatch").
 	Code string `protobuf:"bytes,1,opt,name=code,proto3" json:"code,omitempty"`
-	// Brief title
+	// Brief error title.
 	Title string `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	// Support ticket ID for tracking
+	// Support ticket ID for tracking.
 	SupportTicketId string `protobuf:"bytes,4,opt,name=support_ticket_id,json=supportTicketId,proto3" json:"support_ticket_id,omitempty"`
-	// Pre-rendered error message with span annotations (for simple clients)
+	// Human-readable error message with source annotations.
 	Message string `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	// Source location
+	// Source code location where the error occurred.
 	Location *Location `protobuf:"bytes,7,opt,name=location,proto3" json:"location,omitempty"`
-	// JSON-encoded error details (actual KustoError for reconstruction)
+	// Structured error details as JSON.
 	Details       string `protobuf:"bytes,8,opt,name=details,proto3" json:"details,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1086,7 +1494,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_query_proto_msgTypes[12]
+	mi := &file_query_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1098,7 +1506,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[12]
+	mi := &file_query_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1111,7 +1519,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{12}
+	return file_query_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Error) GetCode() string {
@@ -1156,7 +1564,7 @@ func (x *Error) GetDetails() string {
 	return ""
 }
 
-// Source code location
+// A range within the query source text.
 type Location struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StartByte     uint32                 `protobuf:"varint,1,opt,name=start_byte,json=startByte,proto3" json:"start_byte,omitempty"`
@@ -1171,7 +1579,7 @@ type Location struct {
 
 func (x *Location) Reset() {
 	*x = Location{}
-	mi := &file_query_proto_msgTypes[13]
+	mi := &file_query_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1183,7 +1591,7 @@ func (x *Location) String() string {
 func (*Location) ProtoMessage() {}
 
 func (x *Location) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[13]
+	mi := &file_query_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1196,7 +1604,7 @@ func (x *Location) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Location.ProtoReflect.Descriptor instead.
 func (*Location) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{13}
+	return file_query_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Location) GetStartByte() uint32 {
@@ -1241,17 +1649,20 @@ func (x *Location) GetEndColumn() uint32 {
 	return 0
 }
 
+// A partial failure for one or more segments that could not be read.
 type PartialFailure struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SegmentIds    []string               `protobuf:"bytes,1,rep,name=segment_ids,json=segmentIds,proto3" json:"segment_ids,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// IDs of the affected segments.
+	SegmentIds []string `protobuf:"bytes,1,rep,name=segment_ids,json=segmentIds,proto3" json:"segment_ids,omitempty"`
+	// Human-readable error description.
+	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PartialFailure) Reset() {
 	*x = PartialFailure{}
-	mi := &file_query_proto_msgTypes[14]
+	mi := &file_query_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1263,7 +1674,7 @@ func (x *PartialFailure) String() string {
 func (*PartialFailure) ProtoMessage() {}
 
 func (x *PartialFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[14]
+	mi := &file_query_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1276,7 +1687,7 @@ func (x *PartialFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartialFailure.ProtoReflect.Descriptor instead.
 func (*PartialFailure) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{14}
+	return file_query_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PartialFailure) GetSegmentIds() []string {
@@ -1293,19 +1704,20 @@ func (x *PartialFailure) GetMessage() string {
 	return ""
 }
 
-// Visualization metadata from render operator
+// Visualization metadata from the `render` operator.
 type VisualizationMetadata struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Visualization type: "table", "timechart", "linechart", etc.
-	VisualizationType *string           `protobuf:"bytes,1,opt,name=visualization_type,json=visualizationType,proto3,oneof" json:"visualization_type,omitempty"`
-	Properties        map[string]string `protobuf:"bytes,2,rep,name=properties,proto3" json:"properties,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Visualization type (e.g., "table", "timechart", "piechart", "linechart").
+	VisualizationType *string `protobuf:"bytes,1,opt,name=visualization_type,json=visualizationType,proto3,oneof" json:"visualization_type,omitempty"`
+	// Visualization properties (e.g., x-column, y-columns, legend).
+	Properties    map[string]string `protobuf:"bytes,2,rep,name=properties,proto3" json:"properties,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *VisualizationMetadata) Reset() {
 	*x = VisualizationMetadata{}
-	mi := &file_query_proto_msgTypes[15]
+	mi := &file_query_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1317,7 +1729,7 @@ func (x *VisualizationMetadata) String() string {
 func (*VisualizationMetadata) ProtoMessage() {}
 
 func (x *VisualizationMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[15]
+	mi := &file_query_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1330,7 +1742,7 @@ func (x *VisualizationMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VisualizationMetadata.ProtoReflect.Descriptor instead.
 func (*VisualizationMetadata) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{15}
+	return file_query_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *VisualizationMetadata) GetVisualizationType() string {
@@ -1347,12 +1759,14 @@ func (x *VisualizationMetadata) GetProperties() map[string]string {
 	return nil
 }
 
+// Metadata for the current result set.
 type ResultMetadata struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	PartialFailures []*PartialFailure      `protobuf:"bytes,1,rep,name=partial_failures,json=partialFailures,proto3" json:"partial_failures,omitempty"`
-	// Visualization metadata from render operator (if present)
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Segments that could not be read (partial data loss).
+	PartialFailures []*PartialFailure `protobuf:"bytes,1,rep,name=partial_failures,json=partialFailures,proto3" json:"partial_failures,omitempty"`
+	// Visualization hints from the `render` operator, if present.
 	Visualization *VisualizationMetadata `protobuf:"bytes,2,opt,name=visualization,proto3,oneof" json:"visualization,omitempty"`
-	// Execution warnings (limits hit, etc.)
+	// Execution warnings (e.g., "summarize memory limit reached", "result truncated").
 	Warnings      []*QueryWarning `protobuf:"bytes,3,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1360,7 +1774,7 @@ type ResultMetadata struct {
 
 func (x *ResultMetadata) Reset() {
 	*x = ResultMetadata{}
-	mi := &file_query_proto_msgTypes[16]
+	mi := &file_query_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1372,7 +1786,7 @@ func (x *ResultMetadata) String() string {
 func (*ResultMetadata) ProtoMessage() {}
 
 func (x *ResultMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[16]
+	mi := &file_query_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1385,7 +1799,7 @@ func (x *ResultMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultMetadata.ProtoReflect.Descriptor instead.
 func (*ResultMetadata) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{16}
+	return file_query_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ResultMetadata) GetPartialFailures() []*PartialFailure {
@@ -1409,20 +1823,20 @@ func (x *ResultMetadata) GetWarnings() []*QueryWarning {
 	return nil
 }
 
-// Warning produced during query execution (e.g., limit was hit).
+// A warning produced during query execution.
 type QueryWarning struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Operator ID for source correlation
+	// Operator ID for source correlation.
 	OperatorId uint32 `protobuf:"varint,1,opt,name=operator_id,json=operatorId,proto3" json:"operator_id,omitempty"`
-	// Branch index for fork queries (0 = not a fork)
+	// Branch index for fork queries (0 = main branch).
 	BranchIndex *uint32 `protobuf:"varint,2,opt,name=branch_index,json=branchIndex,proto3,oneof" json:"branch_index,omitempty"`
-	// Warning kind discriminator (e.g., "SummarizeMemoryLimit")
+	// Warning kind discriminator (e.g., "SummarizeMemoryLimit", "ResultTruncated").
 	Kind string `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`
-	// Source location (resolved from span registry)
+	// Source location where the warning originated.
 	Location *Location `protobuf:"bytes,4,opt,name=location,proto3,oneof" json:"location,omitempty"`
-	// Human-readable message
+	// Human-readable warning message.
 	Message string `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	// Structured details as JSON
+	// Structured warning details as JSON.
 	Details       string `protobuf:"bytes,6,opt,name=details,proto3" json:"details,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1430,7 +1844,7 @@ type QueryWarning struct {
 
 func (x *QueryWarning) Reset() {
 	*x = QueryWarning{}
-	mi := &file_query_proto_msgTypes[17]
+	mi := &file_query_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1442,7 +1856,7 @@ func (x *QueryWarning) String() string {
 func (*QueryWarning) ProtoMessage() {}
 
 func (x *QueryWarning) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[17]
+	mi := &file_query_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1455,7 +1869,7 @@ func (x *QueryWarning) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryWarning.ProtoReflect.Descriptor instead.
 func (*QueryWarning) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{17}
+	return file_query_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *QueryWarning) GetOperatorId() uint32 {
@@ -1504,12 +1918,13 @@ var File_query_proto protoreflect.FileDescriptor
 
 const file_query_proto_rawDesc = "" +
 	"\n" +
-	"\vquery.proto\x12\x05query\x1a\x13dynamic_value.proto\"s\n" +
+	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xa5\x01\n" +
 	"\x13ExecuteQueryRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\tR\x05since\x12\x14\n" +
 	"\x05until\x18\x03 \x01(\tR\x05until\x12\x1a\n" +
-	"\btimezone\x18\x04 \x01(\tR\btimezone\"\xcd\x02\n" +
+	"\btimezone\x18\x04 \x01(\tR\btimezone\x120\n" +
+	"\bdatabase\x18\x05 \x01(\v2\x14.berserk.DatabaseRefR\bdatabase\"\xcd\x02\n" +
 	"\x17ExecuteQueryResultFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12,\n" +
@@ -1522,27 +1937,39 @@ const file_query_proto_rawDesc = "" +
 	"\apayload\"J\n" +
 	"\vTableSchema\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
-	"\acolumns\x18\x02 \x03(\v2\r.query.ColumnR\acolumns\"_\n" +
+	"\acolumns\x18\x02 \x03(\v2\r.query.ColumnR\acolumns\"\xb8\x01\n" +
 	"\x06Column\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12%\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x11.query.ColumnTypeR\x04type\x12\x1a\n" +
-	"\bnullable\x18\x03 \x01(\bR\bnullable\"\xb2\x01\n" +
+	"\bnullable\x18\x03 \x01(\bR\bnullable\x12C\n" +
+	"\x0fstructural_type\x18\x04 \x01(\v2\x15.query.StructuralTypeH\x00R\x0estructuralType\x88\x01\x01B\x12\n" +
+	"\x10_structural_type\"\xac\x01\n" +
+	"\x0eStructuralType\x12+\n" +
+	"\x06scalar\x18\x01 \x01(\x0e2\x11.query.ColumnTypeH\x00R\x06scalar\x126\n" +
+	"\n" +
+	"array_elem\x18\x02 \x01(\v2\x15.query.StructuralTypeH\x00R\tarrayElem\x12-\n" +
+	"\x06object\x18\x03 \x01(\v2\x13.query.ObjectSchemaH\x00R\x06objectB\x06\n" +
+	"\x04kind\":\n" +
+	"\fObjectSchema\x12*\n" +
+	"\x06fields\x18\x01 \x03(\v2\x12.query.ObjectFieldR\x06fields\"L\n" +
+	"\vObjectField\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12)\n" +
+	"\x04type\x18\x02 \x01(\v2\x15.query.StructuralTypeR\x04type\"\xb2\x01\n" +
 	"\bRowBatch\x12\x1d\n" +
 	"\n" +
 	"table_name\x18\x01 \x01(\tR\ttableName\x12.\n" +
 	"\x13result_iteration_id\x18\x02 \x01(\tR\x11resultIterationId\x12#\n" +
 	"\x04rows\x18\x03 \x03(\v2\x0f.query.ValueRowR\x04rows\x122\n" +
-	"\x15is_iteration_complete\x18\x04 \x01(\bR\x13isIterationComplete\"<\n" +
-	"\bValueRow\x120\n" +
-	"\x06values\x18\x01 \x03(\v2\x18.segment_files.TTDynamicR\x06values\"\x84\n" +
-	"\n" +
+	"\x15is_iteration_complete\x18\x04 \x01(\bR\x13isIterationComplete\"5\n" +
+	"\bValueRow\x12)\n" +
+	"\x06values\x18\x01 \x03(\v2\x11.berserk.BqlValueR\x06values\"\xcf\x0f\n" +
 	"\bProgress\x12%\n" +
 	"\x0erows_processed\x18\x01 \x01(\x04R\rrowsProcessed\x12!\n" +
 	"\fchunks_total\x18\x02 \x01(\x04R\vchunksTotal\x12%\n" +
 	"\x0echunks_scanned\x18\x03 \x01(\x04R\rchunksScanned\x120\n" +
 	"\x14chunks_skipped_range\x18\x04 \x01(\x04R\x12chunksSkippedRange\x120\n" +
-	"\x14chunks_skipped_bloom\x18\x05 \x01(\x04R\x12chunksSkippedBloom\x12.\n" +
-	"\x13chunks_skipped_shar\x18\x06 \x01(\x04R\x11chunksSkippedShar\x12)\n" +
+	"\x14chunks_skipped_bloom\x18\x05 \x01(\x04R\x12chunksSkippedBloom\x120\n" +
+	"\x14chunks_skipped_shard\x18\x06 \x01(\x04R\x12chunksSkippedShard\x12)\n" +
 	"\x10predicate_checks\x18\a \x01(\x04R\x0fpredicateChecks\x128\n" +
 	"\x18short_circuit_completion\x18\t \x01(\bR\x16shortCircuitCompletion\x12<\n" +
 	"\x1bchunk_scanned_raw_body_size\x18\n" +
@@ -1560,10 +1987,26 @@ const file_query_proto_rawDesc = "" +
 	"\x11chunks_empty_scan\x18\x15 \x01(\x04R\x0fchunksEmptyScan\x12%\n" +
 	"\x0echunks_errored\x18\x16 \x01(\x04R\rchunksErrored\x12C\n" +
 	"\x1echunks_skipped_required_fields\x18\x17 \x01(\x04R\x1bchunksSkippedRequiredFields\x12M\n" +
-	"\x14operator_diagnostics\x18\x18 \x03(\v2\x1a.query.OperatorDiagnosticsR\x13operatorDiagnosticsB\x0f\n" +
+	"\x14operator_diagnostics\x18\x18 \x03(\v2\x1a.query.OperatorDiagnosticsR\x13operatorDiagnostics\x12/\n" +
+	"\x14chunks_range_per_row\x18\x19 \x01(\x04R\x11chunksRangePerRow\x12\x1f\n" +
+	"\vmerge_count\x18\x1a \x01(\x04R\n" +
+	"mergeCount\x127\n" +
+	"\x18reducer_clone_time_nanos\x18\x1b \x01(\x04R\x15reducerCloneTimeNanos\x12.\n" +
+	"\x13reducer_clone_count\x18\x1c \x01(\x04R\x11reducerCloneCount\x129\n" +
+	"\x19snapshot_build_time_nanos\x18\x1d \x01(\x04R\x16snapshotBuildTimeNanos\x120\n" +
+	"\x14snapshot_build_count\x18\x1e \x01(\x04R\x12snapshotBuildCount\x12<\n" +
+	"\x1bworker_chunks_arm_cpu_nanos\x18\x1f \x01(\x04R\x17workerChunksArmCpuNanos\x12=\n" +
+	"\x1bworker_fetching_chunk_nanos\x18  \x01(\x04R\x18workerFetchingChunkNanos\x125\n" +
+	"\x17worker_chunk_body_nanos\x18! \x01(\x04R\x14workerChunkBodyNanos\x12C\n" +
+	"\fcustom_stats\x18\" \x03(\v2 .query.Progress.CustomStatsEntryR\vcustomStats\x12(\n" +
+	"\x10s3_retries_total\x18# \x01(\x04R\x0es3RetriesTotal\x12(\n" +
+	"\x10s3_giveups_total\x18$ \x01(\x04R\x0es3GiveupsTotal\x1a>\n" +
+	"\x10CustomStatsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\x0f\n" +
 	"\r_bin_progressB\x13\n" +
 	"\x11_queue_wait_nanosB\x14\n" +
-	"\x12_planning_progress\"s\n" +
+	"\x12_planning_progressJ\x04\b\b\x10\tR\fbloom_checks\"s\n" +
 	"\x13OperatorDiagnostics\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1f\n" +
 	"\voperator_id\x18\x02 \x01(\rR\n" +
@@ -1625,14 +2068,14 @@ const file_query_proto_rawDesc = "" +
 	"\amessage\x18\x05 \x01(\tR\amessage\x12\x18\n" +
 	"\adetails\x18\x06 \x01(\tR\adetailsB\x0f\n" +
 	"\r_branch_indexB\v\n" +
-	"\t_location*\x80\x02\n" +
+	"\t_location*\xfb\x01\n" +
 	"\n" +
 	"ColumnType\x12\x1b\n" +
 	"\x17COLUMN_TYPE_UNSPECIFIED\x10\x00\x12\x14\n" +
-	"\x10COLUMN_TYPE_BOOL\x10\x01\x12\x15\n" +
-	"\x11COLUMN_TYPE_INT32\x10\x02\x12\x15\n" +
-	"\x11COLUMN_TYPE_INT64\x10\x03\x12\x16\n" +
-	"\x12COLUMN_TYPE_DOUBLE\x10\x04\x12\x16\n" +
+	"\x10COLUMN_TYPE_BOOL\x10\x01\x12\x13\n" +
+	"\x0fCOLUMN_TYPE_INT\x10\x02\x12\x14\n" +
+	"\x10COLUMN_TYPE_LONG\x10\x03\x12\x14\n" +
+	"\x10COLUMN_TYPE_REAL\x10\x04\x12\x16\n" +
 	"\x12COLUMN_TYPE_STRING\x10\x05\x12\x18\n" +
 	"\x14COLUMN_TYPE_DATETIME\x10\x06\x12\x18\n" +
 	"\x14COLUMN_TYPE_TIMESPAN\x10\a\x12\x14\n" +
@@ -1654,58 +2097,71 @@ func file_query_proto_rawDescGZIP() []byte {
 }
 
 var file_query_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_query_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_query_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_query_proto_goTypes = []any{
 	(ColumnType)(0),                 // 0: query.ColumnType
 	(*ExecuteQueryRequest)(nil),     // 1: query.ExecuteQueryRequest
 	(*ExecuteQueryResultFrame)(nil), // 2: query.ExecuteQueryResultFrame
 	(*TableSchema)(nil),             // 3: query.TableSchema
 	(*Column)(nil),                  // 4: query.Column
-	(*RowBatch)(nil),                // 5: query.RowBatch
-	(*ValueRow)(nil),                // 6: query.ValueRow
-	(*Progress)(nil),                // 7: query.Progress
-	(*OperatorDiagnostics)(nil),     // 8: query.OperatorDiagnostics
-	(*KeyValue)(nil),                // 9: query.KeyValue
-	(*PlanningProgress)(nil),        // 10: query.PlanningProgress
-	(*BinProgress)(nil),             // 11: query.BinProgress
-	(*Completion)(nil),              // 12: query.Completion
-	(*Error)(nil),                   // 13: query.Error
-	(*Location)(nil),                // 14: query.Location
-	(*PartialFailure)(nil),          // 15: query.PartialFailure
-	(*VisualizationMetadata)(nil),   // 16: query.VisualizationMetadata
-	(*ResultMetadata)(nil),          // 17: query.ResultMetadata
-	(*QueryWarning)(nil),            // 18: query.QueryWarning
-	nil,                             // 19: query.VisualizationMetadata.PropertiesEntry
-	(*segmentpb.TTDynamic)(nil),     // 20: segment_files.TTDynamic
+	(*StructuralType)(nil),          // 5: query.StructuralType
+	(*ObjectSchema)(nil),            // 6: query.ObjectSchema
+	(*ObjectField)(nil),             // 7: query.ObjectField
+	(*RowBatch)(nil),                // 8: query.RowBatch
+	(*ValueRow)(nil),                // 9: query.ValueRow
+	(*Progress)(nil),                // 10: query.Progress
+	(*OperatorDiagnostics)(nil),     // 11: query.OperatorDiagnostics
+	(*KeyValue)(nil),                // 12: query.KeyValue
+	(*PlanningProgress)(nil),        // 13: query.PlanningProgress
+	(*BinProgress)(nil),             // 14: query.BinProgress
+	(*Completion)(nil),              // 15: query.Completion
+	(*Error)(nil),                   // 16: query.Error
+	(*Location)(nil),                // 17: query.Location
+	(*PartialFailure)(nil),          // 18: query.PartialFailure
+	(*VisualizationMetadata)(nil),   // 19: query.VisualizationMetadata
+	(*ResultMetadata)(nil),          // 20: query.ResultMetadata
+	(*QueryWarning)(nil),            // 21: query.QueryWarning
+	nil,                             // 22: query.Progress.CustomStatsEntry
+	nil,                             // 23: query.VisualizationMetadata.PropertiesEntry
+	(*berserkpb.DatabaseRef)(nil),   // 24: berserk.DatabaseRef
+	(*berserkpb.BqlValue)(nil),      // 25: berserk.BqlValue
 }
 var file_query_proto_depIdxs = []int32{
-	3,  // 0: query.ExecuteQueryResultFrame.schema:type_name -> query.TableSchema
-	5,  // 1: query.ExecuteQueryResultFrame.batch:type_name -> query.RowBatch
-	12, // 2: query.ExecuteQueryResultFrame.done:type_name -> query.Completion
-	7,  // 3: query.ExecuteQueryResultFrame.progress:type_name -> query.Progress
-	13, // 4: query.ExecuteQueryResultFrame.error:type_name -> query.Error
-	17, // 5: query.ExecuteQueryResultFrame.metadata:type_name -> query.ResultMetadata
-	4,  // 6: query.TableSchema.columns:type_name -> query.Column
-	0,  // 7: query.Column.type:type_name -> query.ColumnType
-	6,  // 8: query.RowBatch.rows:type_name -> query.ValueRow
-	20, // 9: query.ValueRow.values:type_name -> segment_files.TTDynamic
-	11, // 10: query.Progress.bin_progress:type_name -> query.BinProgress
-	10, // 11: query.Progress.planning_progress:type_name -> query.PlanningProgress
-	8,  // 12: query.Progress.operator_diagnostics:type_name -> query.OperatorDiagnostics
-	9,  // 13: query.OperatorDiagnostics.values:type_name -> query.KeyValue
-	14, // 14: query.Error.location:type_name -> query.Location
-	19, // 15: query.VisualizationMetadata.properties:type_name -> query.VisualizationMetadata.PropertiesEntry
-	15, // 16: query.ResultMetadata.partial_failures:type_name -> query.PartialFailure
-	16, // 17: query.ResultMetadata.visualization:type_name -> query.VisualizationMetadata
-	18, // 18: query.ResultMetadata.warnings:type_name -> query.QueryWarning
-	14, // 19: query.QueryWarning.location:type_name -> query.Location
-	1,  // 20: query.QueryService.ExecuteQuery:input_type -> query.ExecuteQueryRequest
-	2,  // 21: query.QueryService.ExecuteQuery:output_type -> query.ExecuteQueryResultFrame
-	21, // [21:22] is the sub-list for method output_type
-	20, // [20:21] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	24, // 0: query.ExecuteQueryRequest.database:type_name -> berserk.DatabaseRef
+	3,  // 1: query.ExecuteQueryResultFrame.schema:type_name -> query.TableSchema
+	8,  // 2: query.ExecuteQueryResultFrame.batch:type_name -> query.RowBatch
+	15, // 3: query.ExecuteQueryResultFrame.done:type_name -> query.Completion
+	10, // 4: query.ExecuteQueryResultFrame.progress:type_name -> query.Progress
+	16, // 5: query.ExecuteQueryResultFrame.error:type_name -> query.Error
+	20, // 6: query.ExecuteQueryResultFrame.metadata:type_name -> query.ResultMetadata
+	4,  // 7: query.TableSchema.columns:type_name -> query.Column
+	0,  // 8: query.Column.type:type_name -> query.ColumnType
+	5,  // 9: query.Column.structural_type:type_name -> query.StructuralType
+	0,  // 10: query.StructuralType.scalar:type_name -> query.ColumnType
+	5,  // 11: query.StructuralType.array_elem:type_name -> query.StructuralType
+	6,  // 12: query.StructuralType.object:type_name -> query.ObjectSchema
+	7,  // 13: query.ObjectSchema.fields:type_name -> query.ObjectField
+	5,  // 14: query.ObjectField.type:type_name -> query.StructuralType
+	9,  // 15: query.RowBatch.rows:type_name -> query.ValueRow
+	25, // 16: query.ValueRow.values:type_name -> berserk.BqlValue
+	14, // 17: query.Progress.bin_progress:type_name -> query.BinProgress
+	13, // 18: query.Progress.planning_progress:type_name -> query.PlanningProgress
+	11, // 19: query.Progress.operator_diagnostics:type_name -> query.OperatorDiagnostics
+	22, // 20: query.Progress.custom_stats:type_name -> query.Progress.CustomStatsEntry
+	12, // 21: query.OperatorDiagnostics.values:type_name -> query.KeyValue
+	17, // 22: query.Error.location:type_name -> query.Location
+	23, // 23: query.VisualizationMetadata.properties:type_name -> query.VisualizationMetadata.PropertiesEntry
+	18, // 24: query.ResultMetadata.partial_failures:type_name -> query.PartialFailure
+	19, // 25: query.ResultMetadata.visualization:type_name -> query.VisualizationMetadata
+	21, // 26: query.ResultMetadata.warnings:type_name -> query.QueryWarning
+	17, // 27: query.QueryWarning.location:type_name -> query.Location
+	1,  // 28: query.QueryService.ExecuteQuery:input_type -> query.ExecuteQueryRequest
+	2,  // 29: query.QueryService.ExecuteQuery:output_type -> query.ExecuteQueryResultFrame
+	29, // [29:30] is the sub-list for method output_type
+	28, // [28:29] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_query_proto_init() }
@@ -1721,17 +2177,23 @@ func file_query_proto_init() {
 		(*ExecuteQueryResultFrame_Error)(nil),
 		(*ExecuteQueryResultFrame_Metadata)(nil),
 	}
-	file_query_proto_msgTypes[6].OneofWrappers = []any{}
-	file_query_proto_msgTypes[15].OneofWrappers = []any{}
-	file_query_proto_msgTypes[16].OneofWrappers = []any{}
-	file_query_proto_msgTypes[17].OneofWrappers = []any{}
+	file_query_proto_msgTypes[3].OneofWrappers = []any{}
+	file_query_proto_msgTypes[4].OneofWrappers = []any{
+		(*StructuralType_Scalar)(nil),
+		(*StructuralType_ArrayElem)(nil),
+		(*StructuralType_Object)(nil),
+	}
+	file_query_proto_msgTypes[9].OneofWrappers = []any{}
+	file_query_proto_msgTypes[18].OneofWrappers = []any{}
+	file_query_proto_msgTypes[19].OneofWrappers = []any{}
+	file_query_proto_msgTypes[20].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_query_proto_rawDesc), len(file_query_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   19,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
