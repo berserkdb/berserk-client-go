@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	querypb "github.com/berserkdb/berserk-client-go/proto/querypb"
 	berserkpb "github.com/berserkdb/berserk-client-go/proto/berserkpb"
+	querypb "github.com/berserkdb/berserk-client-go/proto/querypb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -57,11 +57,18 @@ func (c *GRPCClient) Query(ctx context.Context, query string, since, until, time
 		defer cancel()
 	}
 
+	database := c.config.Database
+	if database == "" {
+		database = "default"
+	}
 	stream, err := c.client.ExecuteQuery(ctx, &querypb.ExecuteQueryRequest{
 		Query:    query,
 		Since:    since,
 		Until:    until,
 		Timezone: timezone,
+		Database: &berserkpb.DatabaseRef{
+			Identifier: &berserkpb.DatabaseRef_Name{Name: database},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("berserk: execute query: %w", err)

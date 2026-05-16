@@ -21,6 +21,10 @@ type Config struct {
 
 	// ClientName sent as x-bzrk-client-name header.
 	ClientName string
+
+	// Database to resolve unqualified table names against. Sent on every
+	// ExecuteQueryRequest as `database.name`. Defaults to "default".
+	Database string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -30,6 +34,7 @@ func DefaultConfig(endpoint string) Config {
 		Timeout:        30 * time.Second,
 		ConnectTimeout: 10 * time.Second,
 		ClientName:     "berserk-client-go",
+		Database:       "default",
 	}
 }
 
