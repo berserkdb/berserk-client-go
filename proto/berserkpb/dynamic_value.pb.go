@@ -133,7 +133,7 @@ func (x *BqlValue) GetBoolValue() bool {
 	return false
 }
 
-func (x *BqlValue) GetTimespanValue() uint64 {
+func (x *BqlValue) GetTimespanValue() int64 {
 	if x != nil {
 		if x, ok := x.Value.(*BqlValue_TimespanValue); ok {
 			return x.TimespanValue
@@ -205,7 +205,7 @@ type BqlValue_BoolValue struct {
 
 type BqlValue_TimespanValue struct {
 	// Duration in ticks — each tick is 100 nanoseconds (BQL `timespan` type).
-	TimespanValue uint64 `protobuf:"varint,7,opt,name=timespan_value,json=timespanValue,proto3,oneof"`
+	TimespanValue int64 `protobuf:"zigzag64,11,opt,name=timespan_value,json=timespanValue,proto3,oneof"`
 }
 
 type BqlValue_DatetimeValue struct {
@@ -339,7 +339,7 @@ var File_dynamic_value_proto protoreflect.FileDescriptor
 
 const file_dynamic_value_proto_rawDesc = "" +
 	"\n" +
-	"\x13dynamic_value.proto\x12\aberserk\"\x95\x03\n" +
+	"\x13dynamic_value.proto\x12\aberserk\"\x9b\x03\n" +
 	"\bBqlValue\x12\x1f\n" +
 	"\n" +
 	"null_value\x18\x01 \x01(\bH\x00R\tnullValue\x12\x1f\n" +
@@ -351,13 +351,13 @@ const file_dynamic_value_proto_rawDesc = "" +
 	"\fstring_value\x18\x05 \x01(\tH\x00R\vstringValue\x12\x1f\n" +
 	"\n" +
 	"bool_value\x18\x06 \x01(\bH\x00R\tboolValue\x12'\n" +
-	"\x0etimespan_value\x18\a \x01(\x04H\x00R\rtimespanValue\x12'\n" +
+	"\x0etimespan_value\x18\v \x01(\x12H\x00R\rtimespanValue\x12'\n" +
 	"\x0edatetime_value\x18\n" +
 	" \x01(\x04H\x00R\rdatetimeValue\x123\n" +
 	"\tbag_value\x18\b \x01(\v2\x14.berserk.PropertyBagH\x00R\bbagValue\x121\n" +
 	"\varray_value\x18\t \x01(\v2\x0e.berserk.ArrayH\x00R\n" +
 	"arrayValueB\a\n" +
-	"\x05value\"\xa5\x01\n" +
+	"\x05valueJ\x04\b\a\x10\b\"\xa5\x01\n" +
 	"\vPropertyBag\x12D\n" +
 	"\n" +
 	"properties\x18\x01 \x03(\v2$.berserk.PropertyBag.PropertiesEntryR\n" +
