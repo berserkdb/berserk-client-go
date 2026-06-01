@@ -33,18 +33,11 @@ type BqlValue struct {
 	//	*BqlValue_IntValue
 	//	*BqlValue_StringValue
 	//	*BqlValue_BoolValue
-	//	*BqlValue_TimespanValueUnsigned
+	//	*BqlValue_TimespanValue
 	//	*BqlValue_DatetimeValue
 	//	*BqlValue_BagValue
 	//	*BqlValue_ArrayValue
-	Value isBqlValue_Value `protobuf_oneof:"value"`
-	// Signed timespan ticks — the canonical timespan value. Set by writers
-	// whenever the cell is a timespan (the unsigned oneof field can't carry
-	// negatives from datetime subtraction / `timespan(-1s)`). New readers prefer
-	// this when present; old readers ignore it and fall back to the clamped
-	// `timespan_value_unsigned`. Once all clients read this, the unsigned field
-	// (tag 7) can be dropped.
-	TimespanValue *int64 `protobuf:"zigzag64,11,opt,name=timespan_value,json=timespanValue,proto3,oneof" json:"timespan_value,omitempty"`
+	Value         isBqlValue_Value `protobuf_oneof:"value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -140,10 +133,10 @@ func (x *BqlValue) GetBoolValue() bool {
 	return false
 }
 
-func (x *BqlValue) GetTimespanValueUnsigned() uint64 {
+func (x *BqlValue) GetTimespanValue() int64 {
 	if x != nil {
-		if x, ok := x.Value.(*BqlValue_TimespanValueUnsigned); ok {
-			return x.TimespanValueUnsigned
+		if x, ok := x.Value.(*BqlValue_TimespanValue); ok {
+			return x.TimespanValue
 		}
 	}
 	return 0
@@ -174,13 +167,6 @@ func (x *BqlValue) GetArrayValue() *Array {
 		}
 	}
 	return nil
-}
-
-func (x *BqlValue) GetTimespanValue() int64 {
-	if x != nil && x.TimespanValue != nil {
-		return *x.TimespanValue
-	}
-	return 0
 }
 
 type isBqlValue_Value interface {
@@ -217,13 +203,10 @@ type BqlValue_BoolValue struct {
 	BoolValue bool `protobuf:"varint,6,opt,name=bool_value,json=boolValue,proto3,oneof"`
 }
 
-type BqlValue_TimespanValueUnsigned struct {
-	// LEGACY unsigned timespan (BQL `timespan` type), ticks of 100ns. Acts as
-	// the oneof discriminant for timespan cells and carries the value for old
-	// readers; writers clamp negatives to 0, so it's correct only for
-	// non-negative timespans. New readers prefer the signed `timespan_value`
-	// (tag 11). Remove once all clients have migrated.
-	TimespanValueUnsigned uint64 `protobuf:"varint,7,opt,name=timespan_value_unsigned,json=timespanValueUnsigned,proto3,oneof"`
+type BqlValue_TimespanValue struct {
+	// Duration in ticks — each tick is 100 nanoseconds (BQL `timespan` type).
+	// Signed: negatives arise from datetime subtraction / `timespan(-1s)`.
+	TimespanValue int64 `protobuf:"zigzag64,7,opt,name=timespan_value,json=timespanValue,proto3,oneof"`
 }
 
 type BqlValue_DatetimeValue struct {
@@ -253,7 +236,7 @@ func (*BqlValue_StringValue) isBqlValue_Value() {}
 
 func (*BqlValue_BoolValue) isBqlValue_Value() {}
 
-func (*BqlValue_TimespanValueUnsigned) isBqlValue_Value() {}
+func (*BqlValue_TimespanValue) isBqlValue_Value() {}
 
 func (*BqlValue_DatetimeValue) isBqlValue_Value() {}
 
@@ -357,7 +340,7 @@ var File_dynamic_value_proto protoreflect.FileDescriptor
 
 const file_dynamic_value_proto_rawDesc = "" +
 	"\n" +
-	"\x13dynamic_value.proto\x12\aberserk\"\xe5\x03\n" +
+	"\x13dynamic_value.proto\x12\aberserk\"\x95\x03\n" +
 	"\bBqlValue\x12\x1f\n" +
 	"\n" +
 	"null_value\x18\x01 \x01(\bH\x00R\tnullValue\x12\x1f\n" +
@@ -368,16 +351,14 @@ const file_dynamic_value_proto_rawDesc = "" +
 	"\tint_value\x18\x04 \x01(\x05H\x00R\bintValue\x12#\n" +
 	"\fstring_value\x18\x05 \x01(\tH\x00R\vstringValue\x12\x1f\n" +
 	"\n" +
-	"bool_value\x18\x06 \x01(\bH\x00R\tboolValue\x128\n" +
-	"\x17timespan_value_unsigned\x18\a \x01(\x04H\x00R\x15timespanValueUnsigned\x12'\n" +
+	"bool_value\x18\x06 \x01(\bH\x00R\tboolValue\x12'\n" +
+	"\x0etimespan_value\x18\a \x01(\x12H\x00R\rtimespanValue\x12'\n" +
 	"\x0edatetime_value\x18\n" +
 	" \x01(\x04H\x00R\rdatetimeValue\x123\n" +
 	"\tbag_value\x18\b \x01(\v2\x14.berserk.PropertyBagH\x00R\bbagValue\x121\n" +
 	"\varray_value\x18\t \x01(\v2\x0e.berserk.ArrayH\x00R\n" +
-	"arrayValue\x12*\n" +
-	"\x0etimespan_value\x18\v \x01(\x12H\x01R\rtimespanValue\x88\x01\x01B\a\n" +
-	"\x05valueB\x11\n" +
-	"\x0f_timespan_value\"\xa5\x01\n" +
+	"arrayValueB\a\n" +
+	"\x05value\"\xa5\x01\n" +
 	"\vPropertyBag\x12D\n" +
 	"\n" +
 	"properties\x18\x01 \x03(\v2$.berserk.PropertyBag.PropertiesEntryR\n" +
@@ -432,7 +413,7 @@ func file_dynamic_value_proto_init() {
 		(*BqlValue_IntValue)(nil),
 		(*BqlValue_StringValue)(nil),
 		(*BqlValue_BoolValue)(nil),
-		(*BqlValue_TimespanValueUnsigned)(nil),
+		(*BqlValue_TimespanValue)(nil),
 		(*BqlValue_DatetimeValue)(nil),
 		(*BqlValue_BagValue)(nil),
 		(*BqlValue_ArrayValue)(nil),
