@@ -2,14 +2,15 @@ package berserk
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 
 	berserkpb "github.com/berserkdb/berserk-client-go/proto/berserkpb"
 	querypb "github.com/berserkdb/berserk-client-go/proto/querypb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
 
 // GRPCClient is a gRPC client for the Berserk query service.
@@ -19,11 +20,21 @@ type GRPCClient struct {
 	client querypb.QueryServiceClient
 }
 
-// NewGRPCClient creates a new gRPC client.
+// NewGRPCClient creates a new gRPC client. It routes calls through the
+// gateway by default: the configured bearer token is attached as
+// `authorization` metadata and method paths are mounted under
+// Config.GRPCPathPrefix. https endpoints use TLS with the system roots.
 func NewGRPCClient(ctx context.Context, config Config) (*GRPCClient, error) {
+	creds := insecure.NewCredentials()
+	if config.useTLS() {
+		creds = credentials.NewTLS(&tls.Config{})
+	}
+
 	target := config.GRPCTarget()
 	conn, err := grpc.NewClient(target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
+		grpc.WithChainStreamInterceptor(gatewayStreamInterceptor(config.Token, config.GRPCPathPrefix)),
+		grpc.WithChainUnaryInterceptor(gatewayUnaryInterceptor(config.Token, config.GRPCPathPrefix)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("berserk: failed to connect: %w", err)
@@ -42,32 +53,19 @@ func (c *GRPCClient) Query(ctx context.Context, query string, since, until, time
 		timezone = "UTC"
 	}
 
-	md := metadata.New(nil)
-	if c.config.Username != "" {
-		md.Set("x-bzrk-username", c.config.Username)
-	}
-	if c.config.ClientName != "" {
-		md.Set("x-bzrk-client-name", c.config.ClientName)
-	}
-	ctx = metadata.NewOutgoingContext(ctx, md)
-
 	if c.config.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.config.Timeout)
 		defer cancel()
 	}
 
-	database := c.config.Database
-	if database == "" {
-		database = "default"
-	}
 	stream, err := c.client.ExecuteQuery(ctx, &querypb.ExecuteQueryRequest{
 		Query:    query,
 		Since:    since,
 		Until:    until,
 		Timezone: timezone,
 		Database: &berserkpb.DatabaseRef{
-			Identifier: &berserkpb.DatabaseRef_Name{Name: database},
+			Identifier: &berserkpb.DatabaseRef_Name{Name: c.config.DatabaseOrDefault()},
 		},
 	})
 	if err != nil {

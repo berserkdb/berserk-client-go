@@ -26,6 +26,7 @@ func NewHTTPClient(config Config) *HTTPClient {
 }
 
 type kustoV2Request struct {
+	DB  string `json:"db"`
 	CSL string `json:"csl"`
 }
 
@@ -48,7 +49,7 @@ func (c *HTTPClient) Query(ctx context.Context, query string) (*QueryResponse, e
 	endpoint := c.config.NormalizedEndpoint()
 	url := endpoint + "/v2/rest/query"
 
-	body, err := json.Marshal(kustoV2Request{CSL: query})
+	body, err := json.Marshal(kustoV2Request{DB: c.config.DatabaseOrDefault(), CSL: query})
 	if err != nil {
 		return nil, fmt.Errorf("berserk: marshal request: %w", err)
 	}
@@ -58,11 +59,8 @@ func (c *HTTPClient) Query(ctx context.Context, query string) (*QueryResponse, e
 		return nil, fmt.Errorf("berserk: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.config.Username != "" {
-		req.Header.Set("x-bzrk-username", c.config.Username)
-	}
-	if c.config.ClientName != "" {
-		req.Header.Set("x-bzrk-client-name", c.config.ClientName)
+	if c.config.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.config.Token)
 	}
 
 	resp, err := c.httpClient.Do(req)
