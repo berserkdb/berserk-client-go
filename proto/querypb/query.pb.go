@@ -111,9 +111,16 @@ type ExecuteQueryRequest struct {
 	// (`identifier.name`); the server resolves names once per request via
 	// the metadata service. Empty / unset oneof rejected with
 	// `InvalidArgument`.
-	Database      *berserkpb.DatabaseRef `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Database *berserkpb.DatabaseRef `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
+	// INTERNAL — QCS→QC relay only. Set by the query supervisor when
+	// relaying to a spawned per-query coordinator child over its private
+	// UDS; the public endpoint rejects requests that set any of them.
+	NowUnixNanos        *int64 `protobuf:"zigzag64,6,opt,name=now_unix_nanos,json=nowUnixNanos,proto3,oneof" json:"now_unix_nanos,omitempty"`
+	TimeRangeStartNanos *int64 `protobuf:"zigzag64,7,opt,name=time_range_start_nanos,json=timeRangeStartNanos,proto3,oneof" json:"time_range_start_nanos,omitempty"`
+	TimeRangeEndNanos   *int64 `protobuf:"zigzag64,8,opt,name=time_range_end_nanos,json=timeRangeEndNanos,proto3,oneof" json:"time_range_end_nanos,omitempty"`
+	QwsMembers          []byte `protobuf:"bytes,9,opt,name=qws_members,json=qwsMembers,proto3,oneof" json:"qws_members,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ExecuteQueryRequest) Reset() {
@@ -181,6 +188,34 @@ func (x *ExecuteQueryRequest) GetDatabase() *berserkpb.DatabaseRef {
 	return nil
 }
 
+func (x *ExecuteQueryRequest) GetNowUnixNanos() int64 {
+	if x != nil && x.NowUnixNanos != nil {
+		return *x.NowUnixNanos
+	}
+	return 0
+}
+
+func (x *ExecuteQueryRequest) GetTimeRangeStartNanos() int64 {
+	if x != nil && x.TimeRangeStartNanos != nil {
+		return *x.TimeRangeStartNanos
+	}
+	return 0
+}
+
+func (x *ExecuteQueryRequest) GetTimeRangeEndNanos() int64 {
+	if x != nil && x.TimeRangeEndNanos != nil {
+		return *x.TimeRangeEndNanos
+	}
+	return 0
+}
+
+func (x *ExecuteQueryRequest) GetQwsMembers() []byte {
+	if x != nil {
+		return x.QwsMembers
+	}
+	return nil
+}
+
 // A single frame in the streaming response for a query.
 // Frames arrive in order: Schema frames first, then interleaved RowBatch and Progress frames,
 // and finally a Completion or Error frame.
@@ -196,9 +231,13 @@ type ExecuteQueryResultFrame struct {
 	//	*ExecuteQueryResultFrame_Progress
 	//	*ExecuteQueryResultFrame_Error
 	//	*ExecuteQueryResultFrame_Metadata
-	Payload       isExecuteQueryResultFrame_Payload `protobuf_oneof:"payload"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Payload isExecuteQueryResultFrame_Payload `protobuf_oneof:"payload"`
+	// INTERNAL — QCS→QC relay only. Postcard authoritative engine
+	// metadata so the supervisor reconstructs spawned-query results
+	// byte-exact. Never set on the public endpoint; clients ignore it.
+	InternalSidecar []byte `protobuf:"bytes,8,opt,name=internal_sidecar,json=internalSidecar,proto3,oneof" json:"internal_sidecar,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ExecuteQueryResultFrame) Reset() {
@@ -295,6 +334,13 @@ func (x *ExecuteQueryResultFrame) GetMetadata() *ResultMetadata {
 		if x, ok := x.Payload.(*ExecuteQueryResultFrame_Metadata); ok {
 			return x.Metadata
 		}
+	}
+	return nil
+}
+
+func (x *ExecuteQueryResultFrame) GetInternalSidecar() []byte {
+	if x != nil {
+		return x.InternalSidecar
 	}
 	return nil
 }
@@ -919,8 +965,18 @@ type Progress struct {
 	// non-retriable error. Each give-up typically corresponds to a
 	// PartialFailure for the segment it was trying to open.
 	S3GiveupsTotal uint64 `protobuf:"varint,36,opt,name=s3_giveups_total,json=s3GiveupsTotal,proto3" json:"s3_giveups_total,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Map-reduce-state cache: how many slices were seeded from cache
+	// this run. Non-zero means at least one interior slice was reused
+	// from a prior captured entry. Zero for unsliced queries, cold
+	// queries, and queries where the cache is disabled / not eligible.
+	MapReduceStateCacheSlicesReused uint64 `protobuf:"varint,37,opt,name=map_reduce_state_cache_slices_reused,json=mapReduceStateCacheSlicesReused,proto3" json:"map_reduce_state_cache_slices_reused,omitempty"`
+	// Map-reduce-state cache: total slices in the coordinator's slicing
+	// grid for this run. Pair with `_slices_reused` for the per-run
+	// reuse fraction. Zero means the cache was never consulted (not
+	// sliced, no cache wired, or not a cacheable single branch).
+	MapReduceStateCacheSlicesTotal uint64 `protobuf:"varint,38,opt,name=map_reduce_state_cache_slices_total,json=mapReduceStateCacheSlicesTotal,proto3" json:"map_reduce_state_cache_slices_total,omitempty"`
+	unknownFields                  protoimpl.UnknownFields
+	sizeCache                      protoimpl.SizeCache
 }
 
 func (x *Progress) Reset() {
@@ -1198,6 +1254,20 @@ func (x *Progress) GetS3GiveupsTotal() uint64 {
 	return 0
 }
 
+func (x *Progress) GetMapReduceStateCacheSlicesReused() uint64 {
+	if x != nil {
+		return x.MapReduceStateCacheSlicesReused
+	}
+	return 0
+}
+
+func (x *Progress) GetMapReduceStateCacheSlicesTotal() uint64 {
+	if x != nil {
+		return x.MapReduceStateCacheSlicesTotal
+	}
+	return 0
+}
+
 // Diagnostic telemetry for a specific query operator.
 type OperatorDiagnostics struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1381,8 +1451,20 @@ type BinProgress struct {
 	// Completion percentage (0-100) for each bin, one byte per bin.
 	// Index i corresponds to bin i. Value 100 means fully scanned.
 	CompletionPercentages []byte `protobuf:"bytes,3,opt,name=completion_percentages,json=completionPercentages,proto3" json:"completion_percentages,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Numerator of overall completion: sum across slices of the number of
+	// segments whose planning has finished. Paired with overall_total to
+	// form the segment-weighted overall progress — larger slices (more
+	// overlapping segments) contribute proportionally more than small
+	// slices, which matches actual work better than a flat arithmetic mean
+	// across the per-bin bars. Both zero when no segment totals are known
+	// yet (initial planning still running).
+	OverallDone uint64 `protobuf:"varint,5,opt,name=overall_done,json=overallDone,proto3" json:"overall_done,omitempty"`
+	// Denominator of overall completion: sum across slices of the total
+	// segments overlapping that slice. Zero when unknown — clients should
+	// treat (0, 0) as "no overall percentage available yet".
+	OverallTotal  uint64 `protobuf:"varint,6,opt,name=overall_total,json=overallTotal,proto3" json:"overall_total,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BinProgress) Reset() {
@@ -1434,6 +1516,20 @@ func (x *BinProgress) GetCompletionPercentages() []byte {
 		return x.CompletionPercentages
 	}
 	return nil
+}
+
+func (x *BinProgress) GetOverallDone() uint64 {
+	if x != nil {
+		return x.OverallDone
+	}
+	return 0
+}
+
+func (x *BinProgress) GetOverallTotal() uint64 {
+	if x != nil {
+		return x.OverallTotal
+	}
+	return 0
 }
 
 // Signals that the query has completed successfully.
@@ -1918,13 +2014,22 @@ var File_query_proto protoreflect.FileDescriptor
 
 const file_query_proto_rawDesc = "" +
 	"\n" +
-	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xa5\x01\n" +
+	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xbd\x03\n" +
 	"\x13ExecuteQueryRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\tR\x05since\x12\x14\n" +
 	"\x05until\x18\x03 \x01(\tR\x05until\x12\x1a\n" +
 	"\btimezone\x18\x04 \x01(\tR\btimezone\x120\n" +
-	"\bdatabase\x18\x05 \x01(\v2\x14.berserk.DatabaseRefR\bdatabase\"\xcd\x02\n" +
+	"\bdatabase\x18\x05 \x01(\v2\x14.berserk.DatabaseRefR\bdatabase\x12)\n" +
+	"\x0enow_unix_nanos\x18\x06 \x01(\x12H\x00R\fnowUnixNanos\x88\x01\x01\x128\n" +
+	"\x16time_range_start_nanos\x18\a \x01(\x12H\x01R\x13timeRangeStartNanos\x88\x01\x01\x124\n" +
+	"\x14time_range_end_nanos\x18\b \x01(\x12H\x02R\x11timeRangeEndNanos\x88\x01\x01\x12$\n" +
+	"\vqws_members\x18\t \x01(\fH\x03R\n" +
+	"qwsMembers\x88\x01\x01B\x11\n" +
+	"\x0f_now_unix_nanosB\x19\n" +
+	"\x17_time_range_start_nanosB\x17\n" +
+	"\x15_time_range_end_nanosB\x0e\n" +
+	"\f_qws_members\"\x92\x03\n" +
 	"\x17ExecuteQueryResultFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12,\n" +
@@ -1933,8 +2038,10 @@ const file_query_proto_rawDesc = "" +
 	"\x04done\x18\x05 \x01(\v2\x11.query.CompletionH\x00R\x04done\x12-\n" +
 	"\bprogress\x18\x04 \x01(\v2\x0f.query.ProgressH\x00R\bprogress\x12$\n" +
 	"\x05error\x18\x06 \x01(\v2\f.query.ErrorH\x00R\x05error\x123\n" +
-	"\bmetadata\x18\a \x01(\v2\x15.query.ResultMetadataH\x00R\bmetadataB\t\n" +
-	"\apayload\"J\n" +
+	"\bmetadata\x18\a \x01(\v2\x15.query.ResultMetadataH\x00R\bmetadata\x12.\n" +
+	"\x10internal_sidecar\x18\b \x01(\fH\x01R\x0finternalSidecar\x88\x01\x01B\t\n" +
+	"\apayloadB\x13\n" +
+	"\x11_internal_sidecar\"J\n" +
 	"\vTableSchema\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
 	"\acolumns\x18\x02 \x03(\v2\r.query.ColumnR\acolumns\"\xb8\x01\n" +
@@ -1962,7 +2069,7 @@ const file_query_proto_rawDesc = "" +
 	"\x04rows\x18\x03 \x03(\v2\x0f.query.ValueRowR\x04rows\x122\n" +
 	"\x15is_iteration_complete\x18\x04 \x01(\bR\x13isIterationComplete\"5\n" +
 	"\bValueRow\x12)\n" +
-	"\x06values\x18\x01 \x03(\v2\x11.berserk.BqlValueR\x06values\"\xcf\x0f\n" +
+	"\x06values\x18\x01 \x03(\v2\x11.berserk.BqlValueR\x06values\"\xeb\x10\n" +
 	"\bProgress\x12%\n" +
 	"\x0erows_processed\x18\x01 \x01(\x04R\rrowsProcessed\x12!\n" +
 	"\fchunks_total\x18\x02 \x01(\x04R\vchunksTotal\x12%\n" +
@@ -2000,7 +2107,9 @@ const file_query_proto_rawDesc = "" +
 	"\x17worker_chunk_body_nanos\x18! \x01(\x04R\x14workerChunkBodyNanos\x12C\n" +
 	"\fcustom_stats\x18\" \x03(\v2 .query.Progress.CustomStatsEntryR\vcustomStats\x12(\n" +
 	"\x10s3_retries_total\x18# \x01(\x04R\x0es3RetriesTotal\x12(\n" +
-	"\x10s3_giveups_total\x18$ \x01(\x04R\x0es3GiveupsTotal\x1a>\n" +
+	"\x10s3_giveups_total\x18$ \x01(\x04R\x0es3GiveupsTotal\x12M\n" +
+	"$map_reduce_state_cache_slices_reused\x18% \x01(\x04R\x1fmapReduceStateCacheSlicesReused\x12K\n" +
+	"#map_reduce_state_cache_slices_total\x18& \x01(\x04R\x1emapReduceStateCacheSlicesTotal\x1a>\n" +
 	"\x10CustomStatsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\x0f\n" +
@@ -2017,11 +2126,13 @@ const file_query_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"^\n" +
 	"\x10PlanningProgress\x12#\n" +
 	"\rsegments_done\x18\x01 \x01(\x04R\fsegmentsDone\x12%\n" +
-	"\x0esegments_total\x18\x02 \x01(\x04R\rsegmentsTotal\"\x87\x01\n" +
+	"\x0esegments_total\x18\x02 \x01(\x04R\rsegmentsTotal\"\xe6\x01\n" +
 	"\vBinProgress\x12&\n" +
 	"\x0ffirst_bin_start\x18\x01 \x01(\x12R\rfirstBinStart\x12\x19\n" +
 	"\bbin_span\x18\x02 \x01(\x04R\abinSpan\x125\n" +
-	"\x16completion_percentages\x18\x03 \x01(\fR\x15completionPercentages\"\f\n" +
+	"\x16completion_percentages\x18\x03 \x01(\fR\x15completionPercentages\x12!\n" +
+	"\foverall_done\x18\x05 \x01(\x04R\voverallDone\x12#\n" +
+	"\roverall_total\x18\x06 \x01(\x04R\foverallTotalJ\x04\b\x04\x10\x05R\x0foverall_percent\"\f\n" +
 	"\n" +
 	"Completion\"\xbe\x01\n" +
 	"\x05Error\x12\x12\n" +
@@ -2169,6 +2280,7 @@ func file_query_proto_init() {
 	if File_query_proto != nil {
 		return
 	}
+	file_query_proto_msgTypes[0].OneofWrappers = []any{}
 	file_query_proto_msgTypes[1].OneofWrappers = []any{
 		(*ExecuteQueryResultFrame_Schema)(nil),
 		(*ExecuteQueryResultFrame_Batch)(nil),
