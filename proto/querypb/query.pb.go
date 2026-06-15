@@ -119,8 +119,20 @@ type ExecuteQueryRequest struct {
 	TimeRangeStartNanos *int64 `protobuf:"zigzag64,7,opt,name=time_range_start_nanos,json=timeRangeStartNanos,proto3,oneof" json:"time_range_start_nanos,omitempty"`
 	TimeRangeEndNanos   *int64 `protobuf:"zigzag64,8,opt,name=time_range_end_nanos,json=timeRangeEndNanos,proto3,oneof" json:"time_range_end_nanos,omitempty"`
 	QwsMembers          []byte `protobuf:"bytes,9,opt,name=qws_members,json=qwsMembers,proto3,oneof" json:"qws_members,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Ingest-time window (the slicing axis), independent of `since`/`until`
+	// (which bound event time). Same format as `since`/`until`. When set it
+	// restricts `ingest_time` and combines with any in-query
+	// `where ingest_time > ago(..)` bound (tighter wins). Optional on both ends.
+	IngestSince string `protobuf:"bytes,10,opt,name=ingest_since,json=ingestSince,proto3" json:"ingest_since,omitempty"`
+	IngestUntil string `protobuf:"bytes,11,opt,name=ingest_until,json=ingestUntil,proto3" json:"ingest_until,omitempty"`
+	// INTERNAL — QCS→QC relay only, the ingest-window counterpart of
+	// `time_range_start_nanos`/`end_nanos`: the captured, resolved ingest window
+	// so the child does not re-parse `ingest_since`/`ingest_until`. Both set or
+	// both unset.
+	IngestTimeRangeStartNanos *int64 `protobuf:"zigzag64,12,opt,name=ingest_time_range_start_nanos,json=ingestTimeRangeStartNanos,proto3,oneof" json:"ingest_time_range_start_nanos,omitempty"`
+	IngestTimeRangeEndNanos   *int64 `protobuf:"zigzag64,13,opt,name=ingest_time_range_end_nanos,json=ingestTimeRangeEndNanos,proto3,oneof" json:"ingest_time_range_end_nanos,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *ExecuteQueryRequest) Reset() {
@@ -214,6 +226,34 @@ func (x *ExecuteQueryRequest) GetQwsMembers() []byte {
 		return x.QwsMembers
 	}
 	return nil
+}
+
+func (x *ExecuteQueryRequest) GetIngestSince() string {
+	if x != nil {
+		return x.IngestSince
+	}
+	return ""
+}
+
+func (x *ExecuteQueryRequest) GetIngestUntil() string {
+	if x != nil {
+		return x.IngestUntil
+	}
+	return ""
+}
+
+func (x *ExecuteQueryRequest) GetIngestTimeRangeStartNanos() int64 {
+	if x != nil && x.IngestTimeRangeStartNanos != nil {
+		return *x.IngestTimeRangeStartNanos
+	}
+	return 0
+}
+
+func (x *ExecuteQueryRequest) GetIngestTimeRangeEndNanos() int64 {
+	if x != nil && x.IngestTimeRangeEndNanos != nil {
+		return *x.IngestTimeRangeEndNanos
+	}
+	return 0
 }
 
 // A single frame in the streaming response for a query.
@@ -2014,7 +2054,7 @@ var File_query_proto protoreflect.FileDescriptor
 
 const file_query_proto_rawDesc = "" +
 	"\n" +
-	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xbd\x03\n" +
+	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xcf\x05\n" +
 	"\x13ExecuteQueryRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\tR\x05since\x12\x14\n" +
@@ -2025,11 +2065,18 @@ const file_query_proto_rawDesc = "" +
 	"\x16time_range_start_nanos\x18\a \x01(\x12H\x01R\x13timeRangeStartNanos\x88\x01\x01\x124\n" +
 	"\x14time_range_end_nanos\x18\b \x01(\x12H\x02R\x11timeRangeEndNanos\x88\x01\x01\x12$\n" +
 	"\vqws_members\x18\t \x01(\fH\x03R\n" +
-	"qwsMembers\x88\x01\x01B\x11\n" +
+	"qwsMembers\x88\x01\x01\x12!\n" +
+	"\fingest_since\x18\n" +
+	" \x01(\tR\vingestSince\x12!\n" +
+	"\fingest_until\x18\v \x01(\tR\vingestUntil\x12E\n" +
+	"\x1dingest_time_range_start_nanos\x18\f \x01(\x12H\x04R\x19ingestTimeRangeStartNanos\x88\x01\x01\x12A\n" +
+	"\x1bingest_time_range_end_nanos\x18\r \x01(\x12H\x05R\x17ingestTimeRangeEndNanos\x88\x01\x01B\x11\n" +
 	"\x0f_now_unix_nanosB\x19\n" +
 	"\x17_time_range_start_nanosB\x17\n" +
 	"\x15_time_range_end_nanosB\x0e\n" +
-	"\f_qws_members\"\x92\x03\n" +
+	"\f_qws_membersB \n" +
+	"\x1e_ingest_time_range_start_nanosB\x1e\n" +
+	"\x1c_ingest_time_range_end_nanos\"\x92\x03\n" +
 	"\x17ExecuteQueryResultFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12,\n" +
