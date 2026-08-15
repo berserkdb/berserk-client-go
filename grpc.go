@@ -137,8 +137,8 @@ func (c *GRPCClient) Query(ctx context.Context, query string, since, until, time
 		case *querypb.ExecuteQueryResultFrame_Metadata:
 			for _, pf := range p.Metadata.PartialFailures {
 				partialFailures = append(partialFailures, PartialFailure{
-					SegmentIDs: pf.SegmentIds,
-					Message:    pf.Message,
+					SegmentCount: pf.SegmentCount,
+					Message:      pf.Message,
 				})
 			}
 			for _, w := range p.Metadata.Warnings {

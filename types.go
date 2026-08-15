@@ -56,10 +56,11 @@ type QueryWarning struct {
 	Message string `json:"message"`
 }
 
-// PartialFailure describes segments that couldn't be read.
+// PartialFailure describes segments that couldn't be read. Segment ids are
+// not exposed: they are internal storage identifiers no client can act on.
 type PartialFailure struct {
-	SegmentIDs []string `json:"segment_ids"`
-	Message    string   `json:"message"`
+	SegmentCount uint64 `json:"segment_count"`
+	Message      string `json:"message"`
 }
 
 // VisualizationMetadata from the render operator.

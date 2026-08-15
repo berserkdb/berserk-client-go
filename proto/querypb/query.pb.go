@@ -112,25 +112,42 @@ type ExecuteQueryRequest struct {
 	// the metadata service. Empty / unset oneof rejected with
 	// `InvalidArgument`.
 	Database *berserkpb.DatabaseRef `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
-	// INTERNAL — QCS→QC relay only. Set by the query supervisor when
-	// relaying to a spawned per-query coordinator child over its private
-	// UDS; the public endpoint rejects requests that set any of them.
-	NowUnixNanos        *int64 `protobuf:"zigzag64,6,opt,name=now_unix_nanos,json=nowUnixNanos,proto3,oneof" json:"now_unix_nanos,omitempty"`
+	// The supervisor's captured now(), as nanoseconds since the Unix
+	// epoch. When set, the child uses it verbatim instead of reading its
+	// own clock, and `since`/`until` are ignored in favor of the
+	// time-range nanos pair below.
+	NowUnixNanos *int64 `protobuf:"zigzag64,6,opt,name=now_unix_nanos,json=nowUnixNanos,proto3,oneof" json:"now_unix_nanos,omitempty"`
+	// Resolved query time range (inclusive start, exclusive end), as
+	// nanoseconds since the Unix epoch. Both set or both unset. Optional:
+	// when the API request carried no explicit range the child derives
+	// the scan window from the query itself, exactly like in-process.
 	TimeRangeStartNanos *int64 `protobuf:"zigzag64,7,opt,name=time_range_start_nanos,json=timeRangeStartNanos,proto3,oneof" json:"time_range_start_nanos,omitempty"`
 	TimeRangeEndNanos   *int64 `protobuf:"zigzag64,8,opt,name=time_range_end_nanos,json=timeRangeEndNanos,proto3,oneof" json:"time_range_end_nanos,omitempty"`
-	QwsMembers          []byte `protobuf:"bytes,9,opt,name=qws_members,json=qwsMembers,proto3,oneof" json:"qws_members,omitempty"`
+	// Postcard-serialized QWS cluster-member snapshot (the supervisor's
+	// polled `ClusterPool` view) the child builds its frozen pool from.
+	// The only meta-derived input relayed; everything else (catalog,
+	// segment listing) the child fetches itself.
+	QwsMembers []byte `protobuf:"bytes,9,opt,name=qws_members,json=qwsMembers,proto3,oneof" json:"qws_members,omitempty"`
 	// Ingest-time window (the slicing axis), independent of `since`/`until`
 	// (which bound event time). Same format as `since`/`until`. When set it
 	// restricts `ingest_time` and combines with any in-query
-	// `where ingest_time > ago(..)` bound (tighter wins). Optional on both ends.
+	// `where ingest_time > ago(..)` bound (tighter wins). Optional on both
+	// ends; an unset end means "up to now".
 	IngestSince string `protobuf:"bytes,10,opt,name=ingest_since,json=ingestSince,proto3" json:"ingest_since,omitempty"`
 	IngestUntil string `protobuf:"bytes,11,opt,name=ingest_until,json=ingestUntil,proto3" json:"ingest_until,omitempty"`
 	// INTERNAL — QCS→QC relay only, the ingest-window counterpart of
-	// `time_range_start_nanos`/`end_nanos`: the captured, resolved ingest window
-	// so the child does not re-parse `ingest_since`/`ingest_until`. Both set or
-	// both unset.
+	// `time_range_start_nanos`/`end_nanos`: the supervisor's captured, resolved
+	// ingest window so the child doesn't re-parse `ingest_since`/`ingest_until`.
+	// Both set or both unset.
 	IngestTimeRangeStartNanos *int64 `protobuf:"zigzag64,12,opt,name=ingest_time_range_start_nanos,json=ingestTimeRangeStartNanos,proto3,oneof" json:"ingest_time_range_start_nanos,omitempty"`
 	IngestTimeRangeEndNanos   *int64 `protobuf:"zigzag64,13,opt,name=ingest_time_range_end_nanos,json=ingestTimeRangeEndNanos,proto3,oneof" json:"ingest_time_range_end_nanos,omitempty"`
+	// Per-execution map-reduce-state-cache bypass. When true the coordinator
+	// treats this one query as if no state cache were wired: it skips both the
+	// reuse-read and the capture write-back, independent of the per-process
+	// `map_reduce_state_cache_disabled` config. Forces a full cold scan of an
+	// already-cached window for repeatable benchmarking, without evicting
+	// anything (no race with concurrent queries). Default false.
+	BypassMapReduceStateCache bool `protobuf:"varint,14,opt,name=bypass_map_reduce_state_cache,json=bypassMapReduceStateCache,proto3" json:"bypass_map_reduce_state_cache,omitempty"`
 	unknownFields             protoimpl.UnknownFields
 	sizeCache                 protoimpl.SizeCache
 }
@@ -256,6 +273,13 @@ func (x *ExecuteQueryRequest) GetIngestTimeRangeEndNanos() int64 {
 	return 0
 }
 
+func (x *ExecuteQueryRequest) GetBypassMapReduceStateCache() bool {
+	if x != nil {
+		return x.BypassMapReduceStateCache
+	}
+	return false
+}
+
 // A single frame in the streaming response for a query.
 // Frames arrive in order: Schema frames first, then interleaved RowBatch and Progress frames,
 // and finally a Completion or Error frame.
@@ -272,9 +296,11 @@ type ExecuteQueryResultFrame struct {
 	//	*ExecuteQueryResultFrame_Error
 	//	*ExecuteQueryResultFrame_Metadata
 	Payload isExecuteQueryResultFrame_Payload `protobuf_oneof:"payload"`
-	// INTERNAL — QCS→QC relay only. Postcard authoritative engine
-	// metadata so the supervisor reconstructs spawned-query results
-	// byte-exact. Never set on the public endpoint; clients ignore it.
+	// INTERNAL — QCS→QC relay only. Postcard-encoded authoritative engine
+	// metadata (typed ExecutionStats, structural-type annotations,
+	// visualization, exact error) the spawned coordinator child attaches
+	// so the supervisor reconstructs results byte-exact with the
+	// in-process path. Never set on the public endpoint; clients ignore it.
 	InternalSidecar []byte `protobuf:"bytes,8,opt,name=internal_sidecar,json=internalSidecar,proto3,oneof" json:"internal_sidecar,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -1015,8 +1041,11 @@ type Progress struct {
 	// reuse fraction. Zero means the cache was never consulted (not
 	// sliced, no cache wired, or not a cacheable single branch).
 	MapReduceStateCacheSlicesTotal uint64 `protobuf:"varint,38,opt,name=map_reduce_state_cache_slices_total,json=mapReduceStateCacheSlicesTotal,proto3" json:"map_reduce_state_cache_slices_total,omitempty"`
-	unknownFields                  protoimpl.UnknownFields
-	sizeCache                      protoimpl.SizeCache
+	// Opinionated query performance quality score, recomputed on every
+	// snapshot. Absent until the coordinator attaches it.
+	Quality       *QueryQuality `protobuf:"bytes,39,opt,name=quality,proto3,oneof" json:"quality,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Progress) Reset() {
@@ -1308,6 +1337,97 @@ func (x *Progress) GetMapReduceStateCacheSlicesTotal() uint64 {
 	return 0
 }
 
+func (x *Progress) GetQuality() *QueryQuality {
+	if x != nil {
+		return x.Quality
+	}
+	return nil
+}
+
+// Query performance quality score. Every field is [0;1] with 1.0 = good;
+// clients render as a percentage or however they like. See
+// docs/dev/query-quality-score.md.
+type QueryQuality struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Headline = scanning * transformation * aggregation.
+	Total float32 `protobuf:"fixed32,1,opt,name=total,proto3" json:"total,omitempty"`
+	// How well bloom/range/shard filters let us skip load+decompress.
+	Scanning float32 `protobuf:"fixed32,2,opt,name=scanning,proto3" json:"scanning,omitempty"`
+	// Per-row mapper work; 1.0 = no transforms.
+	Transformation float32 `protobuf:"fixed32,3,opt,name=transformation,proto3" json:"transformation,omitempty"`
+	// Reducer weight; 1.0 = light/bounded.
+	Aggregation float32 `protobuf:"fixed32,4,opt,name=aggregation,proto3" json:"aggregation,omitempty"`
+	// Blend weight: 0 = pure plan estimate, 1 = pure live-stats measure.
+	Measured      float32 `protobuf:"fixed32,5,opt,name=measured,proto3" json:"measured,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryQuality) Reset() {
+	*x = QueryQuality{}
+	mi := &file_query_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryQuality) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryQuality) ProtoMessage() {}
+
+func (x *QueryQuality) ProtoReflect() protoreflect.Message {
+	mi := &file_query_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryQuality.ProtoReflect.Descriptor instead.
+func (*QueryQuality) Descriptor() ([]byte, []int) {
+	return file_query_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *QueryQuality) GetTotal() float32 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *QueryQuality) GetScanning() float32 {
+	if x != nil {
+		return x.Scanning
+	}
+	return 0
+}
+
+func (x *QueryQuality) GetTransformation() float32 {
+	if x != nil {
+		return x.Transformation
+	}
+	return 0
+}
+
+func (x *QueryQuality) GetAggregation() float32 {
+	if x != nil {
+		return x.Aggregation
+	}
+	return 0
+}
+
+func (x *QueryQuality) GetMeasured() float32 {
+	if x != nil {
+		return x.Measured
+	}
+	return 0
+}
+
 // Diagnostic telemetry for a specific query operator.
 type OperatorDiagnostics struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1323,7 +1443,7 @@ type OperatorDiagnostics struct {
 
 func (x *OperatorDiagnostics) Reset() {
 	*x = OperatorDiagnostics{}
-	mi := &file_query_proto_msgTypes[10]
+	mi := &file_query_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1335,7 +1455,7 @@ func (x *OperatorDiagnostics) String() string {
 func (*OperatorDiagnostics) ProtoMessage() {}
 
 func (x *OperatorDiagnostics) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[10]
+	mi := &file_query_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1348,7 +1468,7 @@ func (x *OperatorDiagnostics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperatorDiagnostics.ProtoReflect.Descriptor instead.
 func (*OperatorDiagnostics) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{10}
+	return file_query_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *OperatorDiagnostics) GetKind() string {
@@ -1383,7 +1503,7 @@ type KeyValue struct {
 
 func (x *KeyValue) Reset() {
 	*x = KeyValue{}
-	mi := &file_query_proto_msgTypes[11]
+	mi := &file_query_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1395,7 +1515,7 @@ func (x *KeyValue) String() string {
 func (*KeyValue) ProtoMessage() {}
 
 func (x *KeyValue) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[11]
+	mi := &file_query_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1408,7 +1528,7 @@ func (x *KeyValue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeyValue.ProtoReflect.Descriptor instead.
 func (*KeyValue) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{11}
+	return file_query_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *KeyValue) GetKey() string {
@@ -1438,7 +1558,7 @@ type PlanningProgress struct {
 
 func (x *PlanningProgress) Reset() {
 	*x = PlanningProgress{}
-	mi := &file_query_proto_msgTypes[12]
+	mi := &file_query_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1450,7 +1570,7 @@ func (x *PlanningProgress) String() string {
 func (*PlanningProgress) ProtoMessage() {}
 
 func (x *PlanningProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[12]
+	mi := &file_query_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1463,7 +1583,7 @@ func (x *PlanningProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlanningProgress.ProtoReflect.Descriptor instead.
 func (*PlanningProgress) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{12}
+	return file_query_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PlanningProgress) GetSegmentsDone() uint64 {
@@ -1509,7 +1629,7 @@ type BinProgress struct {
 
 func (x *BinProgress) Reset() {
 	*x = BinProgress{}
-	mi := &file_query_proto_msgTypes[13]
+	mi := &file_query_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1521,7 +1641,7 @@ func (x *BinProgress) String() string {
 func (*BinProgress) ProtoMessage() {}
 
 func (x *BinProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[13]
+	mi := &file_query_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1534,7 +1654,7 @@ func (x *BinProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BinProgress.ProtoReflect.Descriptor instead.
 func (*BinProgress) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{13}
+	return file_query_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *BinProgress) GetFirstBinStart() int64 {
@@ -1581,7 +1701,7 @@ type Completion struct {
 
 func (x *Completion) Reset() {
 	*x = Completion{}
-	mi := &file_query_proto_msgTypes[14]
+	mi := &file_query_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1593,7 +1713,7 @@ func (x *Completion) String() string {
 func (*Completion) ProtoMessage() {}
 
 func (x *Completion) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[14]
+	mi := &file_query_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1606,7 +1726,7 @@ func (x *Completion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Completion.ProtoReflect.Descriptor instead.
 func (*Completion) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{14}
+	return file_query_proto_rawDescGZIP(), []int{15}
 }
 
 // A query execution error.
@@ -1630,7 +1750,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_query_proto_msgTypes[15]
+	mi := &file_query_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1642,7 +1762,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[15]
+	mi := &file_query_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1655,7 +1775,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{15}
+	return file_query_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Error) GetCode() string {
@@ -1715,7 +1835,7 @@ type Location struct {
 
 func (x *Location) Reset() {
 	*x = Location{}
-	mi := &file_query_proto_msgTypes[16]
+	mi := &file_query_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1727,7 +1847,7 @@ func (x *Location) String() string {
 func (*Location) ProtoMessage() {}
 
 func (x *Location) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[16]
+	mi := &file_query_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1740,7 +1860,7 @@ func (x *Location) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Location.ProtoReflect.Descriptor instead.
 func (*Location) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{16}
+	return file_query_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Location) GetStartByte() uint32 {
@@ -1788,17 +1908,26 @@ func (x *Location) GetEndColumn() uint32 {
 // A partial failure for one or more segments that could not be read.
 type PartialFailure struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// IDs of the affected segments.
+	// OBSOLETE — always empty, never populated. Segment ids are internal
+	// storage identifiers no client can act on; only the node holding the
+	// segments needs them, and it logs them locally against the query's
+	// trace id. The field stays in the schema so existing generated clients
+	// keep compiling; read `segment_count` instead.
+	//
+	// Deprecated: Marked as deprecated in query.proto.
 	SegmentIds []string `protobuf:"bytes,1,rep,name=segment_ids,json=segmentIds,proto3" json:"segment_ids,omitempty"`
 	// Human-readable error description.
-	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	Message string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
+	// How many segments this failure covers — enough to judge how much of
+	// the result is missing.
+	SegmentCount  uint64 `protobuf:"varint,3,opt,name=segment_count,json=segmentCount,proto3" json:"segment_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PartialFailure) Reset() {
 	*x = PartialFailure{}
-	mi := &file_query_proto_msgTypes[17]
+	mi := &file_query_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1810,7 +1939,7 @@ func (x *PartialFailure) String() string {
 func (*PartialFailure) ProtoMessage() {}
 
 func (x *PartialFailure) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[17]
+	mi := &file_query_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1823,9 +1952,10 @@ func (x *PartialFailure) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartialFailure.ProtoReflect.Descriptor instead.
 func (*PartialFailure) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{17}
+	return file_query_proto_rawDescGZIP(), []int{18}
 }
 
+// Deprecated: Marked as deprecated in query.proto.
 func (x *PartialFailure) GetSegmentIds() []string {
 	if x != nil {
 		return x.SegmentIds
@@ -1838,6 +1968,13 @@ func (x *PartialFailure) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *PartialFailure) GetSegmentCount() uint64 {
+	if x != nil {
+		return x.SegmentCount
+	}
+	return 0
 }
 
 // Visualization metadata from the `render` operator.
@@ -1853,7 +1990,7 @@ type VisualizationMetadata struct {
 
 func (x *VisualizationMetadata) Reset() {
 	*x = VisualizationMetadata{}
-	mi := &file_query_proto_msgTypes[18]
+	mi := &file_query_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1865,7 +2002,7 @@ func (x *VisualizationMetadata) String() string {
 func (*VisualizationMetadata) ProtoMessage() {}
 
 func (x *VisualizationMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[18]
+	mi := &file_query_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1878,7 +2015,7 @@ func (x *VisualizationMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VisualizationMetadata.ProtoReflect.Descriptor instead.
 func (*VisualizationMetadata) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{18}
+	return file_query_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *VisualizationMetadata) GetVisualizationType() string {
@@ -1898,11 +2035,18 @@ func (x *VisualizationMetadata) GetProperties() map[string]string {
 // Metadata for the current result set.
 type ResultMetadata struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Segments that could not be read (partial data loss).
+	// Data is MISSING from the result: rows the query should have covered were
+	// not read (unreachable segments, an unavailable stream group, a lost
+	// worker, a deadline cut). Consumers must treat the result as incomplete —
+	// the completeness watermark and result caching are suppressed whenever any
+	// entry is present. Contrast with `warnings`.
 	PartialFailures []*PartialFailure `protobuf:"bytes,1,rep,name=partial_failures,json=partialFailures,proto3" json:"partial_failures,omitempty"`
 	// Visualization hints from the `render` operator, if present.
 	Visualization *VisualizationMetadata `protobuf:"bytes,2,opt,name=visualization,proto3,oneof" json:"visualization,omitempty"`
-	// Execution warnings (e.g., "summarize memory limit reached", "result truncated").
+	// Advisory only: the result is COMPLETE, but how the query ran deserves
+	// attention (e.g. "summarize memory limit reached", "result truncated",
+	// planner fallbacks). Anything that implies missing rows belongs in
+	// `partial_failures`, never here.
 	Warnings      []*QueryWarning `protobuf:"bytes,3,rep,name=warnings,proto3" json:"warnings,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1910,7 +2054,7 @@ type ResultMetadata struct {
 
 func (x *ResultMetadata) Reset() {
 	*x = ResultMetadata{}
-	mi := &file_query_proto_msgTypes[19]
+	mi := &file_query_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1922,7 +2066,7 @@ func (x *ResultMetadata) String() string {
 func (*ResultMetadata) ProtoMessage() {}
 
 func (x *ResultMetadata) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[19]
+	mi := &file_query_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1935,7 +2079,7 @@ func (x *ResultMetadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultMetadata.ProtoReflect.Descriptor instead.
 func (*ResultMetadata) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{19}
+	return file_query_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ResultMetadata) GetPartialFailures() []*PartialFailure {
@@ -1980,7 +2124,7 @@ type QueryWarning struct {
 
 func (x *QueryWarning) Reset() {
 	*x = QueryWarning{}
-	mi := &file_query_proto_msgTypes[20]
+	mi := &file_query_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1992,7 +2136,7 @@ func (x *QueryWarning) String() string {
 func (*QueryWarning) ProtoMessage() {}
 
 func (x *QueryWarning) ProtoReflect() protoreflect.Message {
-	mi := &file_query_proto_msgTypes[20]
+	mi := &file_query_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2005,7 +2149,7 @@ func (x *QueryWarning) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryWarning.ProtoReflect.Descriptor instead.
 func (*QueryWarning) Descriptor() ([]byte, []int) {
-	return file_query_proto_rawDescGZIP(), []int{20}
+	return file_query_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *QueryWarning) GetOperatorId() uint32 {
@@ -2054,7 +2198,7 @@ var File_query_proto protoreflect.FileDescriptor
 
 const file_query_proto_rawDesc = "" +
 	"\n" +
-	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\xcf\x05\n" +
+	"\vquery.proto\x12\x05query\x1a\x10common_api.proto\x1a\x13dynamic_value.proto\"\x91\x06\n" +
 	"\x13ExecuteQueryRequest\x12\x14\n" +
 	"\x05query\x18\x01 \x01(\tR\x05query\x12\x14\n" +
 	"\x05since\x18\x02 \x01(\tR\x05since\x12\x14\n" +
@@ -2070,7 +2214,8 @@ const file_query_proto_rawDesc = "" +
 	" \x01(\tR\vingestSince\x12!\n" +
 	"\fingest_until\x18\v \x01(\tR\vingestUntil\x12E\n" +
 	"\x1dingest_time_range_start_nanos\x18\f \x01(\x12H\x04R\x19ingestTimeRangeStartNanos\x88\x01\x01\x12A\n" +
-	"\x1bingest_time_range_end_nanos\x18\r \x01(\x12H\x05R\x17ingestTimeRangeEndNanos\x88\x01\x01B\x11\n" +
+	"\x1bingest_time_range_end_nanos\x18\r \x01(\x12H\x05R\x17ingestTimeRangeEndNanos\x88\x01\x01\x12@\n" +
+	"\x1dbypass_map_reduce_state_cache\x18\x0e \x01(\bR\x19bypassMapReduceStateCacheB\x11\n" +
 	"\x0f_now_unix_nanosB\x19\n" +
 	"\x17_time_range_start_nanosB\x17\n" +
 	"\x15_time_range_end_nanosB\x0e\n" +
@@ -2116,7 +2261,7 @@ const file_query_proto_rawDesc = "" +
 	"\x04rows\x18\x03 \x03(\v2\x0f.query.ValueRowR\x04rows\x122\n" +
 	"\x15is_iteration_complete\x18\x04 \x01(\bR\x13isIterationComplete\"5\n" +
 	"\bValueRow\x12)\n" +
-	"\x06values\x18\x01 \x03(\v2\x11.berserk.BqlValueR\x06values\"\xeb\x10\n" +
+	"\x06values\x18\x01 \x03(\v2\x11.berserk.BqlValueR\x06values\"\xab\x11\n" +
 	"\bProgress\x12%\n" +
 	"\x0erows_processed\x18\x01 \x01(\x04R\rrowsProcessed\x12!\n" +
 	"\fchunks_total\x18\x02 \x01(\x04R\vchunksTotal\x12%\n" +
@@ -2156,13 +2301,22 @@ const file_query_proto_rawDesc = "" +
 	"\x10s3_retries_total\x18# \x01(\x04R\x0es3RetriesTotal\x12(\n" +
 	"\x10s3_giveups_total\x18$ \x01(\x04R\x0es3GiveupsTotal\x12M\n" +
 	"$map_reduce_state_cache_slices_reused\x18% \x01(\x04R\x1fmapReduceStateCacheSlicesReused\x12K\n" +
-	"#map_reduce_state_cache_slices_total\x18& \x01(\x04R\x1emapReduceStateCacheSlicesTotal\x1a>\n" +
+	"#map_reduce_state_cache_slices_total\x18& \x01(\x04R\x1emapReduceStateCacheSlicesTotal\x122\n" +
+	"\aquality\x18' \x01(\v2\x13.query.QueryQualityH\x03R\aquality\x88\x01\x01\x1a>\n" +
 	"\x10CustomStatsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\x0f\n" +
 	"\r_bin_progressB\x13\n" +
 	"\x11_queue_wait_nanosB\x14\n" +
-	"\x12_planning_progressJ\x04\b\b\x10\tR\fbloom_checks\"s\n" +
+	"\x12_planning_progressB\n" +
+	"\n" +
+	"\b_qualityJ\x04\b\b\x10\tR\fbloom_checks\"\xa6\x01\n" +
+	"\fQueryQuality\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x02R\x05total\x12\x1a\n" +
+	"\bscanning\x18\x02 \x01(\x02R\bscanning\x12&\n" +
+	"\x0etransformation\x18\x03 \x01(\x02R\x0etransformation\x12 \n" +
+	"\vaggregation\x18\x04 \x01(\x02R\vaggregation\x12\x1a\n" +
+	"\bmeasured\x18\x05 \x01(\x02R\bmeasured\"s\n" +
 	"\x13OperatorDiagnostics\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1f\n" +
 	"\voperator_id\x18\x02 \x01(\rR\n" +
@@ -2198,11 +2352,12 @@ const file_query_proto_rawDesc = "" +
 	"\fstart_column\x18\x04 \x01(\rR\vstartColumn\x12\x19\n" +
 	"\bend_line\x18\x05 \x01(\rR\aendLine\x12\x1d\n" +
 	"\n" +
-	"end_column\x18\x06 \x01(\rR\tendColumn\"K\n" +
-	"\x0ePartialFailure\x12\x1f\n" +
-	"\vsegment_ids\x18\x01 \x03(\tR\n" +
+	"end_column\x18\x06 \x01(\rR\tendColumn\"t\n" +
+	"\x0ePartialFailure\x12#\n" +
+	"\vsegment_ids\x18\x01 \x03(\tB\x02\x18\x01R\n" +
 	"segmentIds\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\xef\x01\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\x12#\n" +
+	"\rsegment_count\x18\x03 \x01(\x04R\fsegmentCount\"\xef\x01\n" +
 	"\x15VisualizationMetadata\x122\n" +
 	"\x12visualization_type\x18\x01 \x01(\tH\x00R\x11visualizationType\x88\x01\x01\x12L\n" +
 	"\n" +
@@ -2255,7 +2410,7 @@ func file_query_proto_rawDescGZIP() []byte {
 }
 
 var file_query_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_query_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_query_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_query_proto_goTypes = []any{
 	(ColumnType)(0),                 // 0: query.ColumnType
 	(*ExecuteQueryRequest)(nil),     // 1: query.ExecuteQueryRequest
@@ -2268,30 +2423,31 @@ var file_query_proto_goTypes = []any{
 	(*RowBatch)(nil),                // 8: query.RowBatch
 	(*ValueRow)(nil),                // 9: query.ValueRow
 	(*Progress)(nil),                // 10: query.Progress
-	(*OperatorDiagnostics)(nil),     // 11: query.OperatorDiagnostics
-	(*KeyValue)(nil),                // 12: query.KeyValue
-	(*PlanningProgress)(nil),        // 13: query.PlanningProgress
-	(*BinProgress)(nil),             // 14: query.BinProgress
-	(*Completion)(nil),              // 15: query.Completion
-	(*Error)(nil),                   // 16: query.Error
-	(*Location)(nil),                // 17: query.Location
-	(*PartialFailure)(nil),          // 18: query.PartialFailure
-	(*VisualizationMetadata)(nil),   // 19: query.VisualizationMetadata
-	(*ResultMetadata)(nil),          // 20: query.ResultMetadata
-	(*QueryWarning)(nil),            // 21: query.QueryWarning
-	nil,                             // 22: query.Progress.CustomStatsEntry
-	nil,                             // 23: query.VisualizationMetadata.PropertiesEntry
-	(*berserkpb.DatabaseRef)(nil),   // 24: berserk.DatabaseRef
-	(*berserkpb.BqlValue)(nil),      // 25: berserk.BqlValue
+	(*QueryQuality)(nil),            // 11: query.QueryQuality
+	(*OperatorDiagnostics)(nil),     // 12: query.OperatorDiagnostics
+	(*KeyValue)(nil),                // 13: query.KeyValue
+	(*PlanningProgress)(nil),        // 14: query.PlanningProgress
+	(*BinProgress)(nil),             // 15: query.BinProgress
+	(*Completion)(nil),              // 16: query.Completion
+	(*Error)(nil),                   // 17: query.Error
+	(*Location)(nil),                // 18: query.Location
+	(*PartialFailure)(nil),          // 19: query.PartialFailure
+	(*VisualizationMetadata)(nil),   // 20: query.VisualizationMetadata
+	(*ResultMetadata)(nil),          // 21: query.ResultMetadata
+	(*QueryWarning)(nil),            // 22: query.QueryWarning
+	nil,                             // 23: query.Progress.CustomStatsEntry
+	nil,                             // 24: query.VisualizationMetadata.PropertiesEntry
+	(*berserkpb.DatabaseRef)(nil),   // 25: berserk.DatabaseRef
+	(*berserkpb.BqlValue)(nil),      // 26: berserk.BqlValue
 }
 var file_query_proto_depIdxs = []int32{
-	24, // 0: query.ExecuteQueryRequest.database:type_name -> berserk.DatabaseRef
+	25, // 0: query.ExecuteQueryRequest.database:type_name -> berserk.DatabaseRef
 	3,  // 1: query.ExecuteQueryResultFrame.schema:type_name -> query.TableSchema
 	8,  // 2: query.ExecuteQueryResultFrame.batch:type_name -> query.RowBatch
-	15, // 3: query.ExecuteQueryResultFrame.done:type_name -> query.Completion
+	16, // 3: query.ExecuteQueryResultFrame.done:type_name -> query.Completion
 	10, // 4: query.ExecuteQueryResultFrame.progress:type_name -> query.Progress
-	16, // 5: query.ExecuteQueryResultFrame.error:type_name -> query.Error
-	20, // 6: query.ExecuteQueryResultFrame.metadata:type_name -> query.ResultMetadata
+	17, // 5: query.ExecuteQueryResultFrame.error:type_name -> query.Error
+	21, // 6: query.ExecuteQueryResultFrame.metadata:type_name -> query.ResultMetadata
 	4,  // 7: query.TableSchema.columns:type_name -> query.Column
 	0,  // 8: query.Column.type:type_name -> query.ColumnType
 	5,  // 9: query.Column.structural_type:type_name -> query.StructuralType
@@ -2301,25 +2457,26 @@ var file_query_proto_depIdxs = []int32{
 	7,  // 13: query.ObjectSchema.fields:type_name -> query.ObjectField
 	5,  // 14: query.ObjectField.type:type_name -> query.StructuralType
 	9,  // 15: query.RowBatch.rows:type_name -> query.ValueRow
-	25, // 16: query.ValueRow.values:type_name -> berserk.BqlValue
-	14, // 17: query.Progress.bin_progress:type_name -> query.BinProgress
-	13, // 18: query.Progress.planning_progress:type_name -> query.PlanningProgress
-	11, // 19: query.Progress.operator_diagnostics:type_name -> query.OperatorDiagnostics
-	22, // 20: query.Progress.custom_stats:type_name -> query.Progress.CustomStatsEntry
-	12, // 21: query.OperatorDiagnostics.values:type_name -> query.KeyValue
-	17, // 22: query.Error.location:type_name -> query.Location
-	23, // 23: query.VisualizationMetadata.properties:type_name -> query.VisualizationMetadata.PropertiesEntry
-	18, // 24: query.ResultMetadata.partial_failures:type_name -> query.PartialFailure
-	19, // 25: query.ResultMetadata.visualization:type_name -> query.VisualizationMetadata
-	21, // 26: query.ResultMetadata.warnings:type_name -> query.QueryWarning
-	17, // 27: query.QueryWarning.location:type_name -> query.Location
-	1,  // 28: query.QueryService.ExecuteQuery:input_type -> query.ExecuteQueryRequest
-	2,  // 29: query.QueryService.ExecuteQuery:output_type -> query.ExecuteQueryResultFrame
-	29, // [29:30] is the sub-list for method output_type
-	28, // [28:29] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	26, // 16: query.ValueRow.values:type_name -> berserk.BqlValue
+	15, // 17: query.Progress.bin_progress:type_name -> query.BinProgress
+	14, // 18: query.Progress.planning_progress:type_name -> query.PlanningProgress
+	12, // 19: query.Progress.operator_diagnostics:type_name -> query.OperatorDiagnostics
+	23, // 20: query.Progress.custom_stats:type_name -> query.Progress.CustomStatsEntry
+	11, // 21: query.Progress.quality:type_name -> query.QueryQuality
+	13, // 22: query.OperatorDiagnostics.values:type_name -> query.KeyValue
+	18, // 23: query.Error.location:type_name -> query.Location
+	24, // 24: query.VisualizationMetadata.properties:type_name -> query.VisualizationMetadata.PropertiesEntry
+	19, // 25: query.ResultMetadata.partial_failures:type_name -> query.PartialFailure
+	20, // 26: query.ResultMetadata.visualization:type_name -> query.VisualizationMetadata
+	22, // 27: query.ResultMetadata.warnings:type_name -> query.QueryWarning
+	18, // 28: query.QueryWarning.location:type_name -> query.Location
+	1,  // 29: query.QueryService.ExecuteQuery:input_type -> query.ExecuteQueryRequest
+	2,  // 30: query.QueryService.ExecuteQuery:output_type -> query.ExecuteQueryResultFrame
+	30, // [30:31] is the sub-list for method output_type
+	29, // [29:30] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_query_proto_init() }
@@ -2343,16 +2500,16 @@ func file_query_proto_init() {
 		(*StructuralType_Object)(nil),
 	}
 	file_query_proto_msgTypes[9].OneofWrappers = []any{}
-	file_query_proto_msgTypes[18].OneofWrappers = []any{}
 	file_query_proto_msgTypes[19].OneofWrappers = []any{}
 	file_query_proto_msgTypes[20].OneofWrappers = []any{}
+	file_query_proto_msgTypes[21].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_query_proto_rawDesc), len(file_query_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   23,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
